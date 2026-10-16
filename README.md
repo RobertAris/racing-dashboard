@@ -21,6 +21,7 @@ From the dashboard directory, install the dashboard and its pinned official
 F1TENTH simulator:
 
 ```bash
+git clone git@github.com:RobertAris/racing-dashboard.git ~/robertaris-racing-dashboard
 cd ~/robertaris-racing-dashboard
 bash scripts/setup_simulator.sh
 .venv/bin/racing-dashboard \
@@ -90,6 +91,8 @@ The charts show commanded/estimated speed, steering, geometric distance to the
 reference route, and planner/full simulation cycle time. Route deviation can be
 intentional obstacle avoidance. A useful setting completes the section safely
 and consistently; low route deviation by itself is not the objective.
+Timing summaries use the captured telemetry samples, rather than every internal
+planning cycle. Full cycle time in direct simulation also includes physics steps.
 
 ## Use it with another branch
 
