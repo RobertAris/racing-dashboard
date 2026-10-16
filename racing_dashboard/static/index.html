@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#111716">
+  <title>RobertAris · Racing Lab</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="RobertAris Racing Lab home"><span class="brand-icon" aria-hidden="true">R<span>↗</span></span><span><b>RobertAris</b><span class="brand-sub">RACING LAB <i>/</i> 06</span></span></a>
+    <nav class="mode-switch" aria-label="Dashboard mode">
+      <button class="mode active" data-mode="simulation" aria-pressed="true">Simulation</button>
+      <button class="mode" data-mode="live" aria-pressed="false">Live car</button>
+      <button class="mode" data-mode="replay" aria-pressed="false">Replay</button>
+    </nav>
+    <div class="server-status"><span id="connection-dot" class="dot"></span><span id="connection-status">Connecting…</span><span class="local-tag">LOCAL</span></div>
+  </header>
+
+  <main>
+    <section class="intro">
+      <div><p class="eyebrow">PLANNER WORKBENCH</p><h1 id="page-title">Find your line.</h1><p id="page-description">See the plan. Tune the response. Compare the run.</p></div>
+      <div class="run-identity"><span id="checkout-name">No checkout connected</span><code id="revision">—</code></div>
+    </section>
+
+    <div id="notice" class="notice" role="status" hidden></div>
+    <div id="error" class="error" role="alert" hidden></div>
+
+    <section class="session-strip" aria-label="Session status">
+      <div class="status-main"><span id="run-dot" class="dot muted"></span><div><span class="metric-label">SESSION</span><strong id="run-status">Ready to connect</strong></div></div>
+      <div><span class="metric-label">ELAPSED</span><strong id="elapsed">—<small>s</small></strong></div>
+      <div><span class="metric-label">PROGRESS</span><strong id="progress">—<small>m</small></strong></div>
+      <div><span class="metric-label">PLAN TIME</span><strong id="planning-time">—<small>ms</small></strong></div>
+      <div><span class="metric-label">POSE / SCAN AGE</span><strong id="sensor-age" class="small-value">— / —</strong></div>
+      <div class="decision"><span class="metric-label">PLANNER DECISION</span><strong id="decision">No telemetry yet</strong></div>
+    </section>
+
+    <div class="workspace">
+      <section class="map-card card" aria-label="Track map">
+        <div class="card-heading"><div class="heading-label"><span class="map-symbol" aria-hidden="true">⌖</span><h2>Track view</h2><span id="frame-label" class="tag">WORLD FRAME</span></div><div class="map-controls"><button id="background-button" class="small-button" aria-pressed="true" title="Show saved map background">Map</button><button id="follow-button" class="small-button" aria-pressed="false">Follow car</button><button id="fit-button" class="small-button" title="Fit route and driven trace">Fit view</button></div></div>
+        <div class="map-stage" id="map-stage">
+          <canvas id="map-canvas" aria-label="Map showing reference route, selected path, search tree, car and driven trace"></canvas>
+          <div id="map-empty" class="empty-state"><span class="empty-icon" aria-hidden="true">⌖</span><h3>Your next run starts here.</h3><p>Connect a Lab 6 checkout, then start a simulation.<br>The route, planner and driven trace will appear together.</p><button id="empty-connect" class="small-button">Open connection settings ↗</button></div>
+          <div class="map-top-label"><span class="dot"></span><span id="map-mode-label">SIMULATION</span></div>
+          <div id="map-scale" class="map-scale"><span></span><small>1 m</small></div>
+          <div class="map-help">Drag to pan <span>·</span> Scroll to zoom</div>
+        </div>
+        <div class="overlay-toolbar" aria-label="Map overlays">
+          <label style="--overlay:#b79bff"><input type="checkbox" data-overlay="reference" checked><span>Reference</span></label>
+          <label style="--overlay:#f1eee5"><input type="checkbox" data-overlay="driven" checked><span>Driven</span></label>
+          <label style="--overlay:#5cd9c3"><input type="checkbox" data-overlay="path" checked><span>Selected path</span></label>
+          <label style="--overlay:#579c94"><input type="checkbox" data-overlay="tree"><span>Tree</span></label>
+          <label style="--overlay:#9aaca5"><input type="checkbox" data-overlay="grid"><span>Grid</span></label>
+          <label style="--overlay:#e3a56a"><input type="checkbox" data-overlay="scan"><span>Scan</span></label>
+          <label style="--overlay:#eabd72"><input type="checkbox" data-overlay="body" checked><span>Body / command</span></label>
+        </div>
+        <div class="map-footer"><span id="map-diagnostics">Telemetry will show what this planner branch exposes.</span><span><i class="legend-line amber"></i>Command arc <span id="command-source" class="subtle">· unavailable</span></span></div>
+      </section>
+
+      <aside class="control-card card" aria-label="Session and tuning controls">
+        <div class="card-heading"><div class="heading-label"><span class="control-symbol" aria-hidden="true">☷</span><h2 id="controls-title">Session controls</h2></div><span id="settings-state" class="tag">NOT CONNECTED</span></div>
+        <div class="control-content">
+          <details id="connection-settings" class="settings-group" open>
+            <summary><span>Connection & setup</span><span class="details-chevron">⌄</span></summary>
+            <div class="settings-body">
+              <div id="simulation-setup">
+                <label class="field-label" for="repo-path">Lab 6 checkout</label>
+                <input id="repo-path" type="text" spellcheck="false" autocomplete="off" placeholder="/path/to/your/lab6-checkout">
+                <p class="field-help">Loads this branch’s planner and defaults. Only edited settings become overrides.</p>
+                <details class="nested-details"><summary>Optional paths <span>⌄</span></summary><div class="settings-body"><label class="field-label" for="helper-path">Simulator helper</label><input id="helper-path" type="text" spellcheck="false" placeholder="Use bundled Lab 6 helper"><label class="field-label" for="waypoints-path">Waypoints CSV</label><input id="waypoints-path" type="text" spellcheck="false" placeholder="Use checkout defaults"><label class="field-label" for="map-path">Saved map YAML</label><input id="map-path" type="text" spellcheck="false" placeholder="Optional map background"></div></details>
+                <div class="field-row"><div><label class="field-label" for="scenario">Scenario</label><select id="scenario"><option value="lap">Track lap</option><option value="straight">Straight</option><option value="turn">Turn</option></select></div><div><label class="field-label" for="seed">Random seed</label><input id="seed" type="number" min="0" max="2147483647" step="1" value="7"></div></div>
+                <button id="connect-button" class="button secondary full">Connect checkout <span>↗</span></button>
+              </div>
+              <div id="live-setup" hidden><p class="help-copy">Run the ROS bridge in your car’s ROS environment, then open this dashboard on your MacBook. See the README for the exact commands and topic mapping.</p><label class="field-label" for="live-map-path">Saved map YAML on dashboard host</label><input id="live-map-path" type="text" spellcheck="false" placeholder="/path/to/saved-map.yaml"><p class="field-help">Live car mode is for monitoring and recording. Tuning controls are disabled.</p><button id="live-connect-button" class="button secondary full">Listen for live telemetry</button></div>
+              <div id="replay-setup" hidden><p class="help-copy">Open a dashboard JSON recording or a Lab 6 simulator CSV to inspect the run.</p><label for="recording-file" class="button secondary full file-button">Load recording <span>↗</span></label><input id="recording-file" type="file" accept=".json,.csv,application/json,text/csv" hidden><p id="recording-file-name" class="field-help">Files are processed by this local dashboard.</p></div>
+            </div>
+          </details>
+
+          <div id="simulation-controls">
+            <div class="section-title"><h3>Tune the drive</h3><span id="pending-indicator" hidden>UNAPPLIED</span></div>
+            <p id="active-config" class="active-config">Active planner settings will appear after connecting.</p>
+            <div class="parameter"><div class="parameter-label"><label for="max_speed">Maximum speed</label><div><input id="max_speed-number" aria-label="Maximum speed numeric value" data-number="max_speed" type="number" min="0.1" max="8" step="0.1" value="2.2"><span>m/s</span></div></div><input id="max_speed" data-parameter="max_speed" type="range" min="0.1" max="8" step="0.1" value="2.2"><div class="range-hints"><span>Slower</span><span>Faster</span></div></div>
+            <div class="parameter"><div class="parameter-label"><label for="tracking_lookahead">Tracking lookahead</label><div><input id="tracking_lookahead-number" aria-label="Tracking lookahead numeric value" data-number="tracking_lookahead" type="number" min="0.1" max="2" step="0.05" value="0.3"><span>m</span></div></div><input id="tracking_lookahead" data-parameter="tracking_lookahead" type="range" min="0.1" max="2" step="0.05" value="0.3"><div class="range-hints"><span>Closer target</span><span>Further target</span></div></div>
+            <details class="advanced-settings"><summary>Advanced planner settings <span>⌄</span></summary><div class="advanced-grid"><label>Goal lookahead <span>m</span><input data-advanced="goal_lookahead" type="number" min="0.1" max="20" step="0.1" value="3"></label><label>Goal bias <span>0–1</span><input data-advanced="goal_bias" type="number" min="0" max="1" step="0.05" value="0.25"></label><label>Expansion distance <span>m</span><input data-advanced="max_expansion_dist" type="number" min="0.01" max="5" step="0.05" value="0.4"></label><label>Planning budget <span>ms</span><input data-advanced="planning_budget" type="number" min="1" max="500" step="1" value="35"></label></div><p class="field-help">A larger planning budget can lower simulation throughput. Changes are validated by the active planner.</p></details>
+            <div class="apply-controls"><button id="apply-button" class="button secondary">Apply live</button><button id="restart-button" class="button secondary">Apply & restart</button></div>
+            <p id="apply-hint" class="field-help">Applied settings appear on the next planning cycle.</p>
+            <div class="preset-row"><select id="preset-select" aria-label="Saved tuning preset"><option value="">Saved presets</option></select><button id="load-preset" class="small-button">Load</button><button id="save-preset" class="small-button">Save</button></div>
+            <button id="export-params" class="export-button">↓ Export ROS parameters <span>.yaml</span></button>
+            <div id="preset-name-row" class="preset-name-row" hidden><input id="preset-name" aria-label="New preset name" type="text" maxlength="64" placeholder="Preset name"><button id="confirm-save-preset" class="small-button">Save preset</button><button id="cancel-save-preset" class="icon-button" aria-label="Cancel saving preset">×</button></div>
+            <div class="run-controls"><button id="run-button" class="button primary">▶ <span>Start simulation</span></button><button id="step-button" class="button icon-button" title="Advance one planning cycle" aria-label="Step one planning cycle">▹|</button><button id="reset-button" class="button icon-button" title="Reset run to its starting state" aria-label="Reset simulation">↺</button></div>
+            <div class="rate-row"><label for="sim-rate">Simulation rate</label><select id="sim-rate"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1× real time</option><option value="2">2×</option><option value="4">4×</option></select></div>
+          </div>
+
+          <div id="replay-controls" hidden><div class="section-title"><h3>Inspect the run</h3><span id="replay-count">0 frames</span></div><div class="run-controls"><button id="replay-play" class="button primary">▶ Play recording</button><button id="replay-step" class="button icon-button" aria-label="Next recording frame">▹|</button></div><input id="replay-scrub" type="range" min="0" max="0" value="0" aria-label="Recording frame"><div class="replay-position"><span id="replay-position">Frame —</span><span id="replay-duration">—</span></div><p class="field-help">Replay shows recorded behavior. Use simulation to evaluate new parameters.</p></div>
+          <div id="live-info" hidden><div class="section-title"><h3>Live telemetry</h3></div><p class="help-copy">Check that the route and localization align with the saved map before evaluating tracking.</p><div class="live-callout"><span class="dot"></span><span id="live-message">Waiting for the ROS bridge.</span></div><p class="field-help">Missing fields remain blank. Planner decisions and sampled branches depend on the active branch’s published topics.</p></div>
+          <details id="diagnostics-panel" class="diagnostics-panel"><summary><span>Diagnostics</span><span id="diagnostics-count">No telemetry</span><span>⌄</span></summary><div id="diagnostics-content"><p class="field-help">Connect a session to inspect available diagnostic information.</p></div></details>
+        </div>
+      </aside>
+    </div>
+
+    <section class="telemetry-section" aria-label="Performance charts">
+      <div class="section-heading"><div><p class="eyebrow">THE RESPONSE</p><h2>Every command leaves a trace.</h2></div><div class="section-note"><span class="dot"></span><span id="chart-window">Recent 30 seconds</span></div></div>
+      <div class="chart-grid">
+        <article class="chart-card card"><div class="chart-header"><h3>Speed</h3><strong id="speed-value">— <small>m/s</small></strong></div><canvas id="speed-chart" aria-label="Commanded and actual speed over time"></canvas><div class="chart-legend"><span><i style="background:#5cd9c3"></i>Command</span><span><i style="background:#eeeae0"></i>Actual / estimated</span></div></article>
+        <article class="chart-card card"><div class="chart-header"><h3>Steering command</h3><strong id="steering-value">— <small>°</small></strong></div><canvas id="steering-chart" aria-label="Steering command over time"></canvas><div class="chart-legend"><span><i style="background:#eabd72"></i>Steering</span></div></article>
+        <article class="chart-card card"><div class="chart-header"><h3>Route deviation</h3><strong id="deviation-value">— <small>m</small></strong></div><canvas id="deviation-chart" aria-label="Absolute distance from reference route over time"></canvas><div class="chart-legend"><span><i style="background:#b79bff"></i>Distance to reference</span></div></article>
+        <article class="chart-card card"><div class="chart-header"><h3>Planning cycle</h3><strong id="cycle-value">— <small>ms</small></strong></div><canvas id="cycle-chart" aria-label="Planning and cycle duration over time"></canvas><div class="chart-legend"><span><i style="background:#5cd9c3"></i>Planning</span><span><i style="background:#7f9fa0"></i>Full cycle</span></div></article>
+      </div>
+    </section>
+
+    <section class="comparison card" aria-label="Run comparison and recording">
+      <div class="comparison-intro"><span class="eyebrow">MAKE IT REPEATABLE</span><h2>Compare against a baseline.</h2><p id="baseline-description">Save a run to keep its driven trace on the map.</p><div class="comparison-actions"><button id="baseline-save" class="small-button">Save baseline</button><button id="baseline-clear" class="small-button" disabled>Clear</button></div></div>
+      <div class="comparison-table"><div class="comparison-row comparison-head"><span>METRIC</span><span>CURRENT</span><span>BASELINE</span></div><div class="comparison-row"><span>Run status</span><strong id="metric-completion">—</strong><strong id="baseline-completion">—</strong></div><div class="comparison-row"><span>Elapsed time</span><strong id="metric-time">—</strong><strong id="baseline-time">—</strong></div><div class="comparison-row"><span>Mean route deviation</span><strong id="metric-error">—</strong><strong id="baseline-error">—</strong></div><div class="comparison-row"><span>Planning time · p95</span><strong id="metric-planning">—</strong><strong id="baseline-planning">—</strong></div></div>
+      <div class="recording-panel"><span class="eyebrow">TAKE THE EVIDENCE</span><h3>Record. Inspect. Improve.</h3><p id="recording-description">0 telemetry frames captured</p><a id="download-recording" class="button secondary" href="/api/recording" download="robertaris-run.json">↓ Download recording</a><p class="field-help">Includes available telemetry and run configuration.</p></div>
+    </section>
+    <footer class="page-footer"><span>RobertAris <b>RACING LAB</b></span><span>Built for Lab 6 · Runs locally · Planner stays in your checkout</span><span id="footer-version">v0.1</span></footer>
+  </main>
+</body>
+</html>

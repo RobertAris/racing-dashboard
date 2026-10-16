@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robertaris-racing-dashboard"
+version = "0.1.0"
+description = "Branch-independent F1TENTH planning, simulation tuning, and replay dashboard by RobertAris"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "RobertAris" }]
+license = { text = "MIT" }
+dependencies = ["numpy>=1.24", "Pillow>=9.0", "PyYAML>=6.0"]
+
+[project.scripts]
+racing-dashboard = "racing_dashboard.server:main"
+racing-dashboard-ros = "racing_dashboard.ros_adapter:main"
+
+[tool.setuptools.package-data]
+racing_dashboard = ["static/*"]
+
+[tool.setuptools.packages.find]
+include = ["racing_dashboard*"]
