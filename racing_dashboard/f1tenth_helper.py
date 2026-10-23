@@ -1,7 +1,7 @@
 """Pinned headless F1TENTH integration shipped with RobertAris' dashboard.
 
 The stock vehicle, LiDAR mounting, integration settings and rear-axle convention
-match the Lab 6 simulator configuration. No planner implementation is included.
+match the official simulator configuration. No controller implementation is included.
 Map loading uses three functions directly from the pinned official
 f1tenth/f1tenth_gym_ros source, without importing its ROS node. Upstream code and
 maps retain their original MIT license (Copyright 2020 Hongrui Zheng).
@@ -99,9 +99,12 @@ if len(_map_helpers) != len(_map_helper_names):
 exec(compile(ast.Module(body=_map_helpers, type_ignores=[]), str(BRIDGE), "exec"), globals())
 
 
-def build_env(track_name="levine_obs", lidar=True, rear_start=(-12., 0., 0.), noise_std=.01, seed=7):
+def build_env(track_name="levine_blocked", lidar=True, rear_start=(-12., 0., 0.), noise_std=.01, seed=7, map_yaml=None):
     """Build the official dynamic model, with 100 Hz physics and stock LiDAR."""
-    track, _ = _load_track_from_yaml(MAPS / f"{track_name}.yaml", 1.0)
+    track_path = pathlib.Path(map_yaml).expanduser().resolve() if map_yaml else MAPS / f"{track_name}.yaml"
+    if not track_path.is_file():
+        raise ValueError(f"Simulator map is missing: {track_path}; run scripts/setup_simulator.sh")
+    track, _ = _load_track_from_yaml(track_path, 1.0)
     config = EnvConfig(
         map_name=track, map_scale=1.0, params=get_f1tenth_vehicle_parameters(), num_agents=1,
         control_config=ControlConfig(longitudinal_mode=LongitudinalActionType.SPEED,

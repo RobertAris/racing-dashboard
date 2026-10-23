@@ -1,65 +1,65 @@
-# Lab 6 live car monitoring — RobertAris
+# Lab 7 MPC live monitoring and lap engineering
 
-The optional adapter subscribes to ROS 2 and sends snapshots to the dashboard over
-HTTP. It never publishes drive commands or writes ROS parameters. Run the adapter
-in your existing ROS environment, and use the MacBook as the browser. Switching
-Lab 6 branches does not require switching the dashboard repository.
+Use the dashboard with the running Lab 7 controller to capture laps, inspect
+tracking behavior and review evidence-backed improvement experiments. The adapter
+subscribes to ROS 2 and sends data to the local dashboard over HTTP. It publishes
+no drive commands and writes no ROS parameters. Controller source remains in its
+own checkout.
 
-## 1. Check the actual car topics
+## Check the running controller and topics
 
-Start your normal saved-map localization and Lab 6 launch, then inspect:
+Use your existing saved-map localization and verified MPC launch workflow. Inspect
+the actual graph before selecting the adapter inputs:
 
 ```bash
+ros2 node list
 ros2 topic info /pf/pose/odom
 ros2 topic echo /pf/pose/odom --once
-ros2 topic info /scan
 ros2 topic info /drive
+ros2 topic info /mpc/reference
+ros2 topic info /mpc/prediction
 ros2 topic list | sort
 ```
 
-The checked Lab 5 waypoint logger uses `/pf/pose/odom` with
-`nav_msgs/msg/Odometry` in `map`; that is the adapter default. Your actual
-localization launch is authoritative. Supported alternatives are:
+The real-car example uses `/pf/pose/odom` with `nav_msgs/msg/Odometry`.
+Your localization launch is authoritative; names alone do not establish message
+types or pose conventions.
 
-| CLI selection | Expected type |
-| --- | --- |
-| `--pose-type odometry` | `nav_msgs/msg/Odometry` |
-| `--pose-type pose` | `geometry_msgs/msg/PoseStamped` |
-| `--pose-type pose_covariance` | `geometry_msgs/msg/PoseWithCovarianceStamped` |
+| Adapter input | Expected ROS message | Purpose |
+| --- | --- | --- |
+| Selected pose topic | Odometry, PoseStamped or PoseWithCovarianceStamped | Localized position/heading and available measured speed |
+| `/drive` | `ackermann_msgs/msg/AckermannDriveStamped` | Commanded speed and steering angle |
+| `/mpc/reference` | `nav_msgs/msg/Path` | Short reference horizon |
+| `/mpc/prediction` | `nav_msgs/msg/Path` | Short predicted trajectory |
+| `/scan` | `sensor_msgs/msg/LaserScan` | Available laser hits for inspection |
+| Full route CSV | Local file on adapter host | Canonical closed lap geometry and source yaw/speed fields |
 
-For example, use `--pose-topic /pf/viz/inferred_pose --pose-type pose` **only if**
-`ros2 topic info` confirms `PoseStamped`. A topic's name does not establish its
-message type. The current Lab 6 simulator default is `/ego_racecar/odom`, also
-Odometry; pass that explicitly when monitoring the ROS simulator.
+For alternate pose types, use `--pose-type pose` for PoseStamped or
+`--pose-type pose_covariance` for PoseWithCovarianceStamped. Pose-only messages
+have no measured speed; commanded speed is never substituted for it.
 
-Make sure the localization pose represents the same physical point that your
-controller uses (for example, the rear axle). The dashboard cannot determine that
-from a topic name. `actual_speed` comes from Odometry's `twist.twist.linear.x`;
-verify your localization publisher actually supplies it. Pose-only messages have
-no measured-speed value, and commanded speed is never substituted for it.
+## Start the server and browser
 
-## 2. Start the dashboard on the ROS host
+Install and start the dashboard as shown in the [README](../README.md). Keep the
+server bound to `127.0.0.1:8765` and load the saved map YAML used for localization,
+with its referenced image. Map paths and analysis source checkout paths refer to
+files on the **dashboard server host**.
 
-Install this standalone tools repo and start its server using the main
-[README](../README.md). Use the dashboard's **Live** mode and load the **saved map
-YAML used for localization**, with its referenced image alongside it. Keep the
-server bound to `127.0.0.1:8765`.
-
-If the ROS host is the car or a Linux computer, open a separate MacBook terminal:
+For a remote ROS host, open a MacBook terminal:
 
 ```bash
 ssh -N -L 8765:127.0.0.1:8765 user@car
 ```
 
-Replace `user@car` with the hostname/IP you normally SSH into. Then open
-`http://127.0.0.1:8765` in the MacBook browser. Keep SSH running. This tunnel lets
-the server remain local on the ROS host; no ROS installation or DDS networking is
-required on the Mac. If ROS and the dashboard already run locally, skip the tunnel.
+Open **http://127.0.0.1:8765**. Keep the tunnel open. This makes the server available
+in the Mac browser without ROS or DDS networking on the Mac. Use the same local
+and remote port, including when choosing a port other than 8765; the ChatGPT
+callback uses that same loopback port.
 
-## 3. Start the adapter in a second ROS-host terminal
+## Connect the adapter
 
-Source the same ROS installation and workspace that run the car. For example,
-substitute your installed distro and workspace for these paths:
+Run it using the ROS host's sourced ROS Python interpreter. For example, replace
+the distro, workspace and file paths below with your actual installation:
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -67,110 +67,233 @@ source ~/f1tenth_ws/install/setup.bash
 cd ~/robertaris-racing-dashboard
 python3 -m racing_dashboard.ros_adapter \
   --url http://127.0.0.1:8765 \
-  --pose-topic /pf/pose/odom \
-  --pose-type odometry \
-  --scan-topic /scan \
-  --drive-topic /drive \
+  --planner-profile mpc \
+  --pose-topic /pf/pose/odom --pose-type odometry \
+  --scan-topic /scan --drive-topic /drive \
   --map-frame map \
-  --route-file /absolute/path/to/your/real_track_waypoints.csv
+  --route-file /absolute/path/to/real_track_x_y_yaw_speed.csv
 ```
 
-The route file is optional when your branch publishes `/rrt/waypoints`. Its first
-two CSV columns must be X and Y in **map-frame meters**; comment headers and one
-ordinary header row are accepted. The file remains local to the adapter host.
-The shipped Levine simulator CSV is not automatically the route for your saved
-real map. Load the real map and its matching real-car waypoints together.
+MPC is the default planner profile; the explicit flag makes the example clear.
+Override the horizon topics with `--path-topic` and `--reference-topic` if the
+running controller uses different names. Missing horizons are reported rather
+than replaced with invented planner output.
 
-With a valid localized pose and route, the adapter reports unsigned geometric
-distance to the nearest route segment and continuous progress along the route.
-Routes are treated as closed loops by default; use `--route-open` for an open
-polyline. Progress unwraps at the loop seam, so it can exceed the route's length
-after a lap. Segment geometry is cached until the route changes. A pose jump over
-1 meter between received poses raises `diagnostics.localization_jump` and resets
-the progress anchor; invalid/stale localization also resets that anchor.
+The adapter needs `rclpy`, `tf2_ros`, `nav_msgs`, `sensor_msgs`, `geometry_msgs`,
+`visualization_msgs` and `ackermann_msgs` from the ROS environment. The server can
+use a separate Python environment. A normal Mac virtual environment generally
+cannot import ROS. No ROS packages are imported by the ordinary server or adapter
+`--help`.
 
-Route deviation is **not** a collision or clearance measure. An RRT detour around
-an obstacle can intentionally increase deviation. These metrics only make sense
-when the route and localization are correctly aligned in the same map; TF cannot
-detect that a different saved map's CSV was loaded. No metric is produced without
-valid localization and route geometry.
+### Monitor an already-running ROS simulator
 
-The ROS Python interpreter must have `rclpy`, `tf2_ros`, `nav_msgs`, `sensor_msgs`,
-`geometry_msgs`, `visualization_msgs`, and `ackermann_msgs` from your ROS workspace.
-The browser server can use its separate Python environment. A normal Mac Python
-venv generally cannot import ROS: do not run the adapter in that environment.
-No ROS packages are imported by the ordinary dashboard server or adapter `--help`.
-
-For ROS simulation with simulated time, also use:
+The simulator's Odometry topic is normally `/ego_racecar/odom`. Check its graph,
+then use the simulator's matching full route and saved map:
 
 ```bash
 python3 -m racing_dashboard.ros_adapter \
+  --url http://127.0.0.1:8765 \
+  --planner-profile mpc \
   --pose-topic /ego_racecar/odom --pose-type odometry \
+  --route-file /absolute/path/to/simulator_x_y_yaw_speed.csv \
   --ros-args -p use_sim_time:=true
 ```
 
-Use the same `ROS_DOMAIN_ID`, RMW configuration and sourced workspace as the
-running car. Leave real-car parameter tuning to the existing controller workflow;
-the dashboard's tuning controls affect its local simulation only.
+Use `use_sim_time` when the simulator publishes ROS clock time. Match its
+`ROS_DOMAIN_ID`, RMW configuration and sourced workspace. This monitors the
+existing ROS simulation and controller.
 
-## What each branch can show
+For standalone simulation without ROS, use the dashboard's separate Lab 7 MPC
+simulation workflow in the [README](../README.md#simulate-the-lab-7-controller-without-ros).
+It reads the selected controller revision and launch configuration without
+switching branches. The lap engineer described here analyzes Live car captures,
+including telemetry received from an existing ROS simulator.
 
-| Input | Visualization |
-| --- | --- |
-| Selected localization topic | Car position, heading, driven trace |
-| `/scan`, `sensor_msgs/msg/LaserScan` | Laser hits transformed from the sensor frame |
-| `/drive`, `ackermann_msgs/msg/AckermannDriveStamped` | Commanded speed and steering |
-| `/rrt/path`, `nav_msgs/msg/Path` | Selected local path |
-| `/rrt/tree`, `visualization_msgs/msg/Marker` LINE_LIST | Accepted RRT tree edges |
-| `/rrt/goal`, Marker | Planning target |
-| `/rrt/waypoints`, Marker | Reference route |
-| `/rrt/grid`, `nav_msgs/msg/OccupancyGrid` | Planner's local occupancy grid |
+## Align the full route, map and vehicle reference
 
-Missing `/rrt/*` topics are reported in diagnostics; the available pose, scan and
-command monitoring still works. These topics do not expose rejected samples,
-planning time, stop reasons, tracking target, effective parameters, or the exact
-command arc. The adapter reports those limitations instead of inventing values.
-It does not infer a vehicle footprint because dimensions and pose reference have
-not been verified on the real car. The current Lab 6 node publishes accepted RRT
-edges rather than a ranked set of complete candidate trajectories.
+Supply the running controller's **full closed-track CSV**, with columns
+`x, y, yaw, speed`: XY in map-frame meters, yaw in radians and speed in m/s.
+Comment headers and one ordinary header row are accepted. The route file is on
+the adapter host. The simulator's bundled route is not automatically aligned to
+a saved real-car map.
 
-## Frames, timing, and connection failures
+`/mpc/reference` and `/mpc/prediction` contain only short horizons. They are never
+the canonical full route for lap detection. Without valid full route geometry,
+the adapter can show telemetry but cannot time a full lap.
 
-All spatial data is transformed into `--map-frame` using TF at its message stamp.
-Marker pose and rotated grid origins are composed as well. Each path pose can use
-its own header, with an empty frame or zero stamp falling back to the path header.
-Sensor extrinsics therefore belong in your normal TF tree. These are planar
-XY/yaw transforms for a level track; scan motion within a sweep is not compensated.
-Zero-stamped messages use the latest transform and are monitored by receive age.
+Check that the pose, route and saved-map origin agree. TF transforms do not detect
+that a route from a different saved map was selected. Geometric route deviation
+is unsigned distance to the nearest route segment, not clearance or collision
+status. Intentional detours can increase it.
 
-If TF is missing or an input is invalid, its previous overlay clears and a
-diagnostic explains the failure. Do not fix an alignment error by relabeling a
-topic's frame. Check the TF chain and that the saved-map origin and route agree:
+The pose must represent the same physical vehicle point used by the controller.
+Set `--pose-offset-m` only after verifying it: a positive value shifts the
+localized pose backward along its heading, matching the reviewed MPC controller's
+`pose_offset` convention. Do not reuse a simulator offset for the real car without
+checking its localization reference.
 
-```bash
-ros2 run tf2_ros tf2_echo map laser
-```
+`--speed-mode auto|longitudinal|magnitude` selects measured-speed semantics.
+The MPC profile's automatic mode uses planar Odometry velocity magnitude, matching
+the reviewed controller. Verify the publisher supplies meaningful velocity and
+frame conventions. Missing measurements remain missing.
 
-Replace `laser` with the scan's actual `header.frame_id`. A localization jump or a
-bad pose reference can still misalign correctly transformed data.
+## Configure and validate the start gate
 
-Dynamic overlays clear after one second without valid input. Pose status becomes
-stale rather than presenting an old location as current. The last valid occupancy
-grid and reference route remain visible because they can be static; their ages
-are reported separately. In particular, a route published at 1 Hz does not flicker
-when a message arrives slightly late. A new route/grid message with failed TF or
-invalid data still clears that overlay (an explicit static route file can remain).
-`--stale-after 1.0` changes this threshold. Message stamps are also checked against
-the ROS clock; large clock errors or mismatched `use_sim_time` appear in diagnostics.
+The default gate center is the first route waypoint, pointing along the route's
+forward tangent. To choose a different gate, provide `--lap-gate-x`,
+`--lap-gate-y` and `--lap-gate-yaw` together, in map-frame meters and radians.
+The yaw points in the intended direction of travel. Adjust
+`--lap-gate-half-width` to cover the actual crossing region.
 
-Snapshots are sent at up to 10 Hz (`--publish-hz`, maximum 30). Network requests
-run in a separate worker with a single latest-snapshot slot. A slow or disconnected
-dashboard cannot block ROS callbacks or build a backlog. POST failures are logged
-and retried with backoff; reconnection resumes with the latest snapshot. Ctrl-C
-stops the monitoring adapter without changing the running controller.
+The first forward crossing begins a timed lap. The next crossing completes it
+only after sufficient ordered route coverage. Reverse crossings, jitter and
+initial partial laps do not become full laps. A localization jump, implausible
+step, missing/stale pose, clock restart or route change can invalidate a capture.
+Use `--lap-min-time`, `--lap-max-gap` and `--lap-max-step` to set verified limits
+for the track and measurement rate. `--route-open` disables lap detection.
 
-Use the dashboard's recording/replay controls to save received snapshots. Those
-files contain what the dashboard received, not all original ROS messages. For
-complete raw input and TF recording, use `ros2 bag record` with your actual pose,
-scan, drive, `/tf`, `/tf_static`, and available `/rrt/*` topics. Keep generated
-recordings out of the Lab 6 source repository.
+Capture uses the adapter's pose stream before the latest-only display transport.
+Completed captures go into a durable outbox, selectable with `--lap-spool-dir`.
+Keep generated data outside controller source control. A slow model or browser
+does not block ROS callbacks. Finite storage limits apply; restore delivery and
+analysis when the queue/backpressure indicators show a backlog.
+
+## Connect your analysis provider
+
+In **Live car → Analysis connection**, choose **ChatGPT plan**, model
+**`gpt-6.1-sol`**, reasoning effort **high**. Install the optional sign-in dependency
+in the server's environment with `python3 -m pip install -e '.[llm]'`.
+
+Select **Analyze completed live laps automatically** and save. Click
+**Connect ChatGPT**, then the displayed **Continue with ChatGPT** link. Sign into
+your own account, authorize this dashboard and return after completion. This is
+an independent, scoped app authorization; the dashboard does not read another
+app's credential cache or gain access to existing ChatGPT conversations.
+
+The callback is `http://127.0.0.1:<dashboard-port>/auth/callback`. Keep the same-port
+SSH tunnel open during sign-in. Each installation uses its own account connection;
+the repository includes no account or personal token. Account/workspace model
+availability and usage limits still apply. A model catalog entry alone does not
+verify that inference will succeed.
+
+Alternatively, use your own **OpenAI API** key, or an **OpenAI-compatible endpoint**
+with a base URL, model and optional key. API billing is independent of a ChatGPT
+subscription. Choose **Provider default** effort if a compatible server expects
+no reasoning-effort field. The endpoint is contacted from the dashboard server
+host; a model on a different machine needs suitable private connectivity.
+
+Saving settings and listing models issue no test inference. The password field
+clears on submission. Credentials stay in protected server-side storage and are
+excluded from evidence exports. Enabled reviews send compact evidence and
+configured source context to the chosen provider. Capturing and viewing laps do
+not require a model connection.
+
+## Pin the Lab 7 controller context
+
+Set **Controller source checkout** to the Lab 7 Git checkout on the dashboard
+server. Set **Git reference** to `origin/liam-trial-2` for Trial 2. It must exist in
+that local repository; the dashboard does not fetch branches for you. Another
+branch, tag or commit can be selected explicitly.
+
+The reader uses Git to resolve a commit and read supported MPC implementation and
+launch files. It does not switch the working tree's branch, import controller
+code or modify files. Each received lap keeps an immutable copy of the selected
+local source manifest.
+
+That manifest is labeled **local source context**, with deployment unverified.
+It cannot establish which package was built, installed or launched on the car.
+A ROS parameter dump can help verify exposed parameters, but does not reveal
+hardcoded cost matrices or model constants. The dashboard leaves effective
+runtime settings unverified unless independently supplied in telemetry. Discussion
+answers are separately labeled user-confirmed context for that lap. CSV speed values
+also do not establish the controller's effective postprocessed speed profile.
+
+## Interpret the report and replay its evidence
+
+A saved lap has deterministic lap/sector measurements and an optional model
+report. Findings separate observation from hypothesis, cite existing evidence,
+recommend one reviewed experiment and explain how to validate it. Baselines require
+matching route, gate and measurement conventions. Active configuration can be
+unknown or different, and track conditions may change between laps.
+
+Select evidence to highlight its recorded map segment in amber. Displayed times
+are seconds since lap start; exports retain the original timestamps.
+**Evidence** downloads measurements, source context, report and discussion as JSON.
+**Replay** downloads a version-1 dashboard recording with scalar pose/command
+samples and the full route. Load it in Replay mode to play, scrub or step. Replay
+is capped at 12,000 frames, preserving both lap boundaries; the evidence export
+retains all captured lap samples. Per-lap archives do not contain scans/grids.
+
+The server persists captures and reports in `laps.sqlite3` under `--data-dir`
+(default `~/.local/share/robertaris-racing-dashboard/`). Finished evidence retention
+and the pending-job queue are bounded. The rolling **Download recording** buffer
+is separate and can drop old frames. Failed model reviews preserve the lap and
+can be retried. The model runs in a background worker, independently of ingestion.
+
+The reviewed MPC's published Paths contain XY/yaw without reference speed, solver
+status, solve duration or iteration counts. Their headers can use solve-completion
+time while their initial state comes from earlier odometry. Missing paths or zero
+drive commands do not establish solver infeasibility. These messages do not support
+a precisely time-aligned prediction residual. Steering is a command, not measured
+wheel angle; route deviation does not establish slip, collision or clearance.
+
+Review proposed changes and apply any chosen experiment through the existing
+controller workflow. The dashboard never applies the recommendation to the car.
+
+## Ask follow-up questions
+
+Select a valid lap and open **Discuss this lap** below its report. Start with the
+suggested prompt or type a question. The engineer can ask which settings were
+active for that captured lap. **Answer this question** opens an explicit setting
+name/value form; check the suggested value, enter your answer and choose
+**Confirm and discuss**. Numeric parameters use plain SI values, such as `3.0`
+for the maximum speed in m/s. **User-confirmed for this lap** lets you inspect,
+correct and retract those facts. Answers remain user-confirmed context for this
+lap, rather than runtime-verified measurements.
+
+The reply can propose one parameter experiment, explain the supporting evidence,
+and state how to validate and roll it back. A code proposal additionally needs
+your confirmation that the exact pinned `deployed_source_commit` was used. Its
+downloadable `.patch` must match the supplied source file at that revision and
+produce valid Python syntax. These checks run in memory; no controller code is
+executed or modified. Test proposed behavior through your normal workflow.
+
+Choose another valid captured lap under **Compare with** and describe the tested
+change to assess its results. Geometry and measurement conventions must match;
+the original lap's confirmations do not automatically describe the other lap.
+The model receives observed time/sector differences with configuration and
+condition uncertainty. This does not establish that a change caused a gain.
+
+Sending a discussion turn uses your selected provider even if automatic analysis
+is paused. Opening a lap alone makes no discussion request. Conversation history
+and current confirmations survive a server restart and are included in Evidence
+exports. Failed turns can be retried; a disconnected provider leaves the turn
+queued. Each lap supports up to 20 exchanges, with a bounded portion of older
+conversation sent to the model alongside the current confirmations.
+
+## Frames, freshness and troubleshooting
+
+Spatial messages are transformed into `--map-frame` using TF at their message
+stamp. A path pose can use its own frame/stamp; an empty frame or zero stamp falls
+back to the path header. Zero-stamped messages use the latest transform and are
+monitored by receive age. Planar XY/yaw transforms assume a level track. Laser
+motion within a scan is not compensated.
+
+A failed transform or invalid message clears its old dynamic overlay and records
+a diagnostic. Dynamic overlays expire after `--stale-after` seconds (default 1).
+A stale pose is not displayed as a fresh current position. Message stamps are
+checked against the ROS clock; mismatched `use_sim_time` appears in diagnostics.
+Do not fix a frame mismatch by relabeling the message. Check the actual TF chain,
+for example `ros2 run tf2_ros tf2_echo map laser` using the scan's real frame name.
+
+Display snapshots default to 10 Hz (`--publish-hz`, maximum 30). A separate
+latest-only HTTP worker prevents network delays from blocking callbacks.
+Connection failures retry with bounded backoff and resume with current telemetry.
+Completed lap delivery uses its separate durable outbox. Ctrl-C stops monitoring
+without changing the running MPC controller.
+
+For complete original messages and TF, record a ROS bag with your actual pose,
+`/drive`, `/mpc/reference`, `/mpc/prediction`, available scan, `/tf` and `/tf_static`
+topics. Keep generated recordings outside the controller repository. Automated
+checks cover conversion and capture logic; verify native ROS transport, map
+alignment and model access in the actual deployment.

@@ -5,6 +5,7 @@ import argparse
 import ast
 from collections import deque
 import copy
+import ipaddress
 import json
 import math
 import mimetypes
@@ -13,49 +14,112 @@ from pathlib import Path
 import queue
 import re
 import signal
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
+from .analysis import AnalysisService
 from .maps import load_map
 from .recording import RunBuffer, import_csv, summarize, unpack_frame, validate_recording, validate_snapshot
 from .simulation import TUNABLES, run_worker, validate_changes, validate_options
 
-DEFAULT_CONFIG = {"max_speed": 2.2, "tracking_lookahead": .3, "goal_lookahead": 3.0,
-                  "goal_bias": .25, "max_expansion_dist": .4, "planning_budget": .035}
+DEFAULT_CONFIG = {"MAX_SPEED": 6.0, "max_accel": 3.0, "profile_accel": 1.5, "profile_decel": 1.5}
 HISTORY_FIELDS = ("time_s", "speed_command", "actual_speed", "steering", "cross_track_error", "planning_ms", "cycle_ms")
 STATIC = Path(__file__).parent / "static"
 
 
-def checkout_defaults(repo):
-    """Read literal UI defaults without importing or running checkout code."""
+def _source_selection(track, ref):
+    if not isinstance(track, str) or track not in {"levine", "spielberg"}:
+        raise ValueError("track must be levine or spielberg")
+    if not isinstance(ref, str) or (ref and (not re.fullmatch(r"[A-Za-z0-9_./-]{1,200}", ref) or ref.startswith("-"))):
+        raise ValueError("ref must be blank for the working tree or a branch, tag, or commit reference")
+    return track, ref
+
+
+def checkout_defaults(repo, track="levine", ref=""):
+    """Read native MPC defaults, then track launch overrides, without execution.
+
+    A blank reference means the selected working tree. An explicit reference is
+    read as Git blobs, leaving the checkout and its active branch unchanged.
+    These are source defaults, never evidence of the live car's active settings.
+    """
+    track, ref = _source_selection(track, ref)
     result = dict(DEFAULT_CONFIG)
     if not repo:
         return result
-    try:
-        source = Path(repo).expanduser() / "lab7_pkg/lab7_pkg/planner.py"
-        tree = ast.parse(source.read_text())
-        config = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PlannerConfig")
-        for node in config.body:
-            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id in TUNABLES:
-                try:
-                    value = ast.literal_eval(node.value)
-                    if type(value) in (int, float) and math.isfinite(value):
-                        result[node.target.id] = value
-                except (ValueError, TypeError):
-                    pass
-    except (OSError, SyntaxError, StopIteration):
-        pass
+    root = Path(repo).expanduser()
+    commit = None
+    if ref:
+        try:
+            commit = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", ref+"^{commit}"],
+                                    check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    text=True, timeout=5).stdout.strip()
+        except (OSError, UnicodeError, subprocess.SubprocessError):
+            return result
+
+    def read_tree(relative):
+        try:
+            if ref:
+                source = subprocess.run(["git", "-C", str(root), "show", "--no-ext-diff", f"{commit}:{relative}"],
+                                        check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                        text=True, timeout=5).stdout
+            else:
+                path = root/relative
+                if path.stat().st_size > 1024*1024:
+                    return None
+                source = path.read_text(encoding="utf-8")
+            if len(source) > 1024*1024:
+                return None
+            return ast.parse(source)
+        except (OSError, UnicodeError, SyntaxError, subprocess.SubprocessError):
+            return None
+
+    def assignment(node, name):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+        if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            try:
+                return ast.literal_eval(node.value)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def merge(values):
+        if isinstance(values, dict):
+            for key in DEFAULT_CONFIG:
+                value = values.get(key)
+                if type(value) in (int, float) and math.isfinite(value) and value > 0:
+                    result[key] = value
+
+    node_tree = read_tree("mpc/scripts/mpc_node.py")
+    if node_tree:
+        for cls in node_tree.body:
+            if not isinstance(cls, ast.ClassDef):
+                continue
+            if cls.name == "mpc_config":
+                for node in cls.body:
+                    value = assignment(node, "MAX_SPEED")
+                    merge({"MAX_SPEED": value})
+            elif cls.name == "MPC":
+                for function in cls.body:
+                    if isinstance(function, ast.FunctionDef) and function.name == "__init__":
+                        for node in function.body:
+                            merge(assignment(node, "defaults"))
+    launch_tree = read_tree(f"mpc/launch/{track}_launch.py")
+    if launch_tree:
+        for node in launch_tree.body:
+            merge(assignment(node, "PARAMETERS"))
     return result
 
 
 class Dashboard:
     def __init__(self, setup=None, data_dir=None):
-        self.setup = {"mode": "simulation", "repo": "", "helper": "", "waypoints": "", "map_yaml": "",
-                      "case": "lap", "seed": 7, "noise": .01, "control_dt": .04, "config": {}, "rate": 1.0}
+        self.setup = {"mode": "live", "repo": "", "track": "levine", "ref": "", "helper": "", "waypoints": "", "map_yaml": "",
+                      "case": "lap", "seed": 7, "noise": .01, "control_dt": .1, "config": {}, "rate": 1.0}
         self.setup.update(setup or {})
-        self.defaults = checkout_defaults(self.setup.get("repo"))
+        _source_selection(self.setup["track"], self.setup["ref"])
+        self.defaults = checkout_defaults(self.setup.get("repo"), self.setup["track"], self.setup["ref"])
         self.data_dir = Path(data_dir or Path.home() / ".local/share/robertaris-racing-dashboard").expanduser()
         self.lock = threading.RLock()
         self.operations = threading.Lock()
@@ -75,6 +139,7 @@ class Dashboard:
         self.replay_clock = 0.0
         self.replay_start_time = 0.0
         self.presets = self._read_presets()
+        self.analysis = AnalysisService(self.data_dir, active=self.setup["mode"] == "live")
         if self.setup.get("map_yaml"):
             self._load_map(self.setup["map_yaml"])
 
@@ -183,7 +248,7 @@ class Dashboard:
 
     def _start_worker(self, run=False):
         options = validate_options(self.setup)
-        self.defaults = checkout_defaults(options["repo"])
+        self.defaults = checkout_defaults(options["repo"], options["track"], options["ref"])
         self._stop_worker()
         with self.lock:
             self._new_recording()
@@ -219,7 +284,7 @@ class Dashboard:
 
     def _show_replay(self, index):
         if not self.replay:
-            raise ValueError("Load a recording or Lab 6 CSV first")
+            raise ValueError("Load a recording or telemetry CSV first")
         self.replay_index = max(0, min(int(index), len(self.replay["frames"]) - 1))
         frame = unpack_frame(self.replay["frames"][self.replay_index], self.replay.get("context", {}))
         frame["recorded_mode"] = frame.get("mode")
@@ -240,6 +305,7 @@ class Dashboard:
             self.map_data, self.map_path, self.map_error = data.get("map"), None, None
             self.error = None
             self._show_replay(0)
+        self.analysis.set_active(False)
         return {"ok": True, "frames": len(data["frames"])}
 
     def command(self, request):
@@ -256,19 +322,20 @@ class Dashboard:
                     raise ValueError("Unknown setup fields: " + ", ".join(sorted(unknown)))
                 if "mode" in updates and updates["mode"] not in {"simulation", "live", "replay"}:
                     raise ValueError("mode must be simulation, live, or replay")
+                _source_selection(updates.get("track", self.setup["track"]), updates.get("ref", self.setup["ref"]))
                 if "config" in updates:
                     updates["config"] = validate_changes(updates["config"])
                 mode_changed = updates.get("mode", self.setup["mode"]) != self.setup["mode"]
-                structural = {"repo", "helper", "waypoints", "map_yaml", "case", "seed", "noise", "control_dt"}
-                source_changed = (self.setup["mode"] == "simulation" and
-                                  any(k in updates and updates[k] != self.setup[k] for k in structural))
+                structural = {"repo", "track", "ref", "helper", "waypoints", "map_yaml", "case", "seed", "noise", "control_dt"}
+                source_changed = any(k in updates and updates[k] != self.setup[k] for k in structural)
                 if mode_changed or source_changed:
                     self._stop_worker()
                 with self.lock:
                     self.setup.update(updates)
-                    self.defaults = checkout_defaults(self.setup.get("repo"))
+                    self.defaults = checkout_defaults(self.setup.get("repo"), self.setup["track"], self.setup["ref"])
                     self.error = None
                     if mode_changed or source_changed:
+                        self.baseline = None
                         if mode_changed:
                             self._new_recording()
                         else:
@@ -285,6 +352,7 @@ class Dashboard:
                             self._show_replay(self.replay_index)
                 if self.setup["mode"] != "replay":
                     self._load_map(self.setup.get("map_yaml"))
+                self.analysis.set_active(self.setup["mode"] == "live")
             elif action == "replay_load":
                 return self.load_replay(request.get("recording"))
             elif action in {"replay_seek", "replay_play", "replay_pause"}:
@@ -375,6 +443,9 @@ class Dashboard:
         return {"ok": True}
 
     def state(self):
+        # Provider authentication may involve network I/O. Never wait for it
+        # while holding the telemetry lock.
+        analysis_state = self.analysis.state()
         with self.lock:
             if self.setup["mode"] == "replay" and self.replay_playing and self.replay:
                 target = self.replay_start_time + time.monotonic() - self.replay_clock
@@ -403,6 +474,7 @@ class Dashboard:
                               "dropped_frames": self.recording.dropped_frames},
                 "presets": [{"name": name, "config": config} for name, config in sorted(self.presets.items())],
                 "baseline": self.baseline, "map": self.map_data,
+                "analysis": analysis_state,
                 "replay": {"index": self.replay_index, "total": len(self.replay["frames"]) if self.replay else 0,
                            "playing": self.replay_playing},
             }
@@ -415,6 +487,7 @@ class Dashboard:
 
     def close(self):
         self.closed = True
+        self.analysis.close()
         self._stop_worker()
 
 
@@ -422,27 +495,117 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "RobertArisRacingLab/0.1"
 
     def log_message(self, fmt, *args):
+        # OAuth codes must not appear in request logs, even on a failed callback.
+        if urlsplit(self.path).path == "/auth/callback":
+            return
         if str(args[1]) not in {"200", "304"}:
             super().log_message(fmt, *args)
 
-    def send_json(self, value, status=200, download=False):
+    def send_json(self, value, status=200, download=False, filename="robertaris-racing-run.json"):
         raw = json.dumps(value, allow_nan=False, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         if download:
-            self.send_header("Content-Disposition", 'attachment; filename="robertaris-racing-run.json"')
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         try:
             self.wfile.write(raw)
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _trusted_host(self):
+        try:
+            host = urlsplit("//" + self.headers.get("Host", ""))
+            valid = (ipaddress.ip_address(self.client_address[0]).is_loopback
+                     and host.hostname in {"127.0.0.1", "localhost"} and not host.username
+                     and not host.password and host.port == self.server.server_port)
+        except ValueError:
+            valid = False
+        if not valid:
+            self.send_json({"ok": False, "error": "Use this dashboard's loopback URL or an SSH tunnel on the same port"}, 403)
+        return valid
+
+    @staticmethod
+    def _resource_id(value):
+        value = unquote(value, errors="strict")
+        if not value or any(character in value for character in ("/", "\\")) or any(ord(character) < 32 for character in value):
+            raise ValueError("Invalid resource identifier")
+        return value
+
     def do_GET(self):
+        if not self._trusted_host():
+            return
         path = urlsplit(self.path).path
-        if path in {"/api/state", "/api/bootstrap"}:
+        if path == "/auth/callback":
+            query = {key: values[0] for key, values in parse_qs(urlsplit(self.path).query).items() if len(values) == 1}
+            try:
+                self.server.dashboard.analysis.connection.auth_callback(query)
+                self.server.dashboard.analysis.wake.set()
+                self.send_response(303)
+                self.send_header("Location", "/")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            except (ValueError, OSError):
+                raw = ("<!doctype html><meta charset=utf-8><title>Connection incomplete</title>"
+                       "<h1>ChatGPT connection incomplete</h1><p>Return to the dashboard and start sign-in again.</p>"
+                       "<p><a href='/'>Return to dashboard</a></p>").encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+        elif path == "/api/analysis/models":
+            try:
+                self.send_json({"ok": True, "models": self.server.dashboard.analysis.connection.models()})
+            except (ValueError, OSError) as exc:
+                self.send_json({"ok": False, "error": str(exc)}, 400)
+        elif path.startswith("/api/laps/"):
+            parts = path.split("/")
+            try:
+                identifier = self._resource_id(parts[3])
+                analysis = self.server.dashboard.analysis
+                if len(parts) == 4:
+                    self.send_json(analysis.get(identifier))
+                elif len(parts) == 5 and parts[4] in {"export", "recording"}:
+                    recording = parts[4] == "recording"
+                    self.send_json(analysis.export(identifier, recording=recording), download=True,
+                                   filename="robertaris-lap-recording.json" if recording else "robertaris-lap-analysis.json")
+                elif (len(parts) == 8 and parts[4] == "discussion" and parts[6] == "proposal"
+                      and parts[7].endswith(".patch")):
+                    message_id = self._resource_id(parts[5])
+                    proposal_id = self._resource_id(parts[7][:-6])
+                    patch = analysis.discussion_patch(identifier, message_id, proposal_id)
+                    if not isinstance(patch, str):
+                        raise ValueError("Proposal patch is unavailable")
+                    raw = patch.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/x-diff; charset=utf-8")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.send_header("Content-Disposition", 'attachment; filename="robertaris-mpc-proposal.patch"')
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Referrer-Policy", "no-referrer")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(raw)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                else:
+                    self.send_error(404)
+            except KeyError:
+                self.send_json({"ok": False, "error": "Lap or discussion resource not found"}, 404)
+            except (ValueError, TypeError, OSError) as exc:
+                self.send_json({"ok": False, "error": str(exc)}, 400)
+        elif path in {"/api/state", "/api/bootstrap"}:
             self.send_json(self.server.dashboard.state())
         elif path == "/api/recording":
             self.send_json(self.server.dashboard.export(), download=True)
@@ -453,12 +616,12 @@ class Handler(BaseHTTPRequestHandler):
                 config = validate_changes(dashboard.setup.get("config", {}))
                 active = (dashboard.session or {}).get("config", {})
                 config = {**{k: v for k, v in active.items() if k in TUNABLES}, **config}
-            raw = ("# RobertAris Racing Lab: load on planner startup; review for your car.\n" +
-                   yaml.safe_dump({"rrt_node": {"ros__parameters": config}}, sort_keys=False)).encode()
+            raw = ("# RobertAris Lab 7 MPC: load on mpc_node startup; review for your car.\n" +
+                   yaml.safe_dump({"mpc_node": {"ros__parameters": config}}, sort_keys=False)).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/yaml")
             self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Content-Disposition", 'attachment; filename="robertaris-rrt-preset.yaml"')
+            self.send_header("Content-Disposition", 'attachment; filename="robertaris-mpc-preset.yaml"')
             self.end_headers()
             self.wfile.write(raw)
         elif path == "/api/health":
@@ -484,23 +647,49 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        if not self._trusted_host():
+            return
         origin = self.headers.get("Origin")
         if origin and urlsplit(origin).netloc != self.headers.get("Host"):
             self.send_json({"ok": False, "error": "Cross-origin writes are disabled"}, 403)
             return
+        path = urlsplit(self.path).path
+        parts = path.split("/")
+        discussion_route = len(parts) >= 5 and parts[:3] == ["", "api", "laps"] and parts[4] == "discussion"
         try:
             if self.headers.get_content_type() != "application/json":
                 raise ValueError("Send application/json")
             length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 68 * 1024 * 1024:
-                raise ValueError("Request must be between 1 byte and 68 MiB")
+            maximum = 32*1024 if discussion_route else 68*1024*1024
+            if length <= 0 or length > maximum:
+                raise ValueError("Discussion request must be between 1 byte and 32 KiB" if discussion_route
+                                 else "Request must be between 1 byte and 68 MiB")
             request = json.loads(self.rfile.read(length), parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"Invalid number: {value}")))
-            path = urlsplit(self.path).path
             dashboard = self.server.dashboard
             if path == "/api/command":
                 result = dashboard.command(request)
             elif path == "/api/live":
                 result = dashboard.ingest_live(request)
+            elif path == "/api/laps":
+                result = dashboard.analysis.ingest(request)
+            elif path == "/api/analysis/settings":
+                result = {"ok": True, **dashboard.analysis.configure(request)}
+            elif path == "/api/analysis/connect":
+                callback = f"http://127.0.0.1:{self.server.server_port}/auth/callback"
+                result = {"ok": True, **dashboard.analysis.connection.auth_start(callback)}
+            elif path == "/api/analysis/disconnect":
+                result = {"ok": True, "connection": dashboard.analysis.connection.disconnect()}
+            elif discussion_route:
+                identifier = self._resource_id(parts[3])
+                if len(parts) == 5:
+                    result = dashboard.analysis.discuss(identifier, request)
+                elif len(parts) == 6 and parts[5] == "retry":
+                    result = dashboard.analysis.retry_discussion(identifier)
+                else:
+                    self.send_json({"ok": False, "error": "Unknown discussion endpoint"}, 404)
+                    return
+            elif len(parts) == 5 and parts[:3] == ["", "api", "laps"] and parts[4] == "retry":
+                result = dashboard.analysis.retry(self._resource_id(parts[3]))
             elif path == "/api/import":
                 content, name = request.get("content", ""), request.get("name", "run.json")
                 data = import_csv(content, name) if name.lower().endswith(".csv") else json.loads(content)
@@ -514,7 +703,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "Unknown endpoint"}, 404)
                 return
             self.send_json(result)
-        except (ValueError, KeyError, TypeError, OSError) as exc:
+        except KeyError as exc:
+            self.send_json({"ok": False, "error": "Lap or discussion resource not found" if discussion_route else str(exc)},
+                           404 if discussion_route else 400)
+        except (ValueError, TypeError, OSError) as exc:
             self.send_json({"ok": False, "error": str(exc)}, 400)
 
 
@@ -526,26 +718,32 @@ def make_server(dashboard, host="127.0.0.1", port=8765):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="RobertAris Racing Lab — local simulation tuning, ROS monitoring, and replay")
-    parser.add_argument("--repo", default="", help="Lab 6 checkout to load (read-only)")
+    parser = argparse.ArgumentParser(description="RobertAris Lab 7 MPC — live lap engineering, simulation tuning, and replay")
+    parser.add_argument("--repo", default="", help="Lab 7 MPC checkout to load (read-only)")
+    parser.add_argument("--track", choices=("levine", "spielberg"), default="levine", help="Track launch defaults and waypoint selection")
+    parser.add_argument("--ref", default="", help="Git branch, tag, or commit; blank uses the working tree")
     parser.add_argument("--helper", default="", help="Simulator helper providing build_env and rear_pose")
-    parser.add_argument("--waypoints", default="", help="XY route CSV override")
+    parser.add_argument("--waypoints", default="", help="Full x,y,yaw,speed MPC route CSV override")
     parser.add_argument("--map", dest="map_yaml", default="", help="Saved ROS map YAML for display (and sim map selection)")
-    parser.add_argument("--mode", choices=("simulation", "live", "replay"), default="simulation")
+    parser.add_argument("--mode", choices=("live", "simulation", "replay"), default="live")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--data-dir", help="Preset directory; defaults to ~/.local/share/robertaris-racing-dashboard")
+    parser.add_argument("--data-dir", help="Local presets and lap history; defaults to ~/.local/share/robertaris-racing-dashboard")
     args = parser.parse_args(argv)
+    try:
+        _source_selection(args.track, args.ref)
+    except ValueError as error:
+        parser.error(str(error))
     if args.host not in {"127.0.0.1", "localhost"}:
         parser.error("Use a loopback host and SSH forwarding for remote access")
-    setup = {key: getattr(args, key) for key in ("repo", "helper", "waypoints", "map_yaml", "mode")}
+    setup = {key: getattr(args, key) for key in ("repo", "track", "ref", "helper", "waypoints", "map_yaml", "mode")}
     dashboard = Dashboard(setup, args.data_dir)
     try:
         server = make_server(dashboard, args.host, args.port)
     except OSError as exc:
         parser.exit(1, f"Could not open dashboard port {args.port}: {exc}\n")
     print(f"RobertAris Racing Lab: http://{args.host}:{server.server_port}", flush=True)
-    print("Simulation loads the selected checkout on Start/Reset. Live Car only monitors ROS.", flush=True)
+    print("Live car monitors ROS and analyzes completed laps when enabled. Simulation loads MPC on Start/Reset.", flush=True)
     def stop(*_):
         threading.Thread(target=server.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, stop)

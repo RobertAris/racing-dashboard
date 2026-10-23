@@ -8,12 +8,17 @@ const fmt = (value, digits = 2) => finite(value) ? Number(value).toFixed(digits)
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const colors = {teal:'#5cd9c3', amber:'#eabd72', violet:'#b79bff', white:'#f0eee5', muted:'#7f9fa0'};
 const TERMINAL = new Set(['complete','completed','finished','failed','collision','no_progress','error']);
-let latest = {}, mode = 'simulation', dirty = false, initialized = false, requestActive = false, commandCount = 0;
+let latest = {}, mode = 'live', dirty = false, initialized = false, requestActive = false, commandCount = 0;
 let overrideConfig = {};
 let noticeTimer, mapImage, mapImageSource, mapReady = false, fitted = false, lastHistoryKey = '', localHistory = [], localTrail = [];
 let showMap = true, configEvents = [], previousConfig = null, previousTime = null;
+let analysisSettingsDirty = false, analysisBusy = false, lapListSignature = '', selectedLapId = null, selectedEvidenceId = null;
+let lapDetail = null, lapDetailKey = '', lapDetailRequest = null, lapReportSignature = '';
+const discussionDrafts = new Map();
+let discussionLapId = null, discussionMessagesKey = '', discussionFactsKey = '', discussionComparisonKey = '';
+let discussionMessagesSource = null, discussionFactsSource = null;
 const camera = {x:0,y:0,scale:40,follow:false};
-const overlays = {reference:true,driven:true,path:true,tree:false,grid:false,scan:false,body:true};
+const overlays = {reference:true,driven:true,path:true,horizon:true,scan:false,body:true};
 const mapCanvas = $('map-canvas');
 let mapWidth = 800, mapHeight = 580, drag = null;
 
@@ -46,21 +51,21 @@ function markDirty() { dirty = true; $('pending-indicator').hidden = false; $('s
 function getConfig() {
   const config = {};
   all('[data-parameter]').forEach(el => config[el.dataset.parameter] = Number($(`${el.dataset.parameter}-number`).value));
-  all('[data-advanced]').forEach(el => config[el.dataset.advanced] = Number(el.value)/(el.dataset.advanced === 'planning_budget' ? 1000 : 1));
+  all('[data-advanced]').forEach(el => config[el.dataset.advanced] = Number(el.value));
   return config;
 }
 function fillConfig(config = {}) {
   all('[data-parameter]').forEach(el => { if (finite(config[el.dataset.parameter])) { el.value = config[el.dataset.parameter]; $(`${el.dataset.parameter}-number`).value = config[el.dataset.parameter]; paintRange(el); } });
-  all('[data-advanced]').forEach(el => { if (finite(config[el.dataset.advanced])) el.value = Number((config[el.dataset.advanced]*(el.dataset.advanced === 'planning_budget' ? 1000 : 1)).toFixed(5)); });
+  all('[data-advanced]').forEach(el => { if (finite(config[el.dataset.advanced])) el.value = Number(Number(config[el.dataset.advanced]).toFixed(5)); });
 }
-function readSetup() { return {mode,repo:$('repo-path').value.trim(),helper:$('helper-path').value.trim(),waypoints:$('waypoints-path').value.trim(),map_yaml:$('map-path').value.trim(),case:$('scenario').value,seed:Number($('seed').value),rate:Number($('sim-rate').value),config:{...overrideConfig}}; }
+function readSetup() { return {mode,repo:$('repo-path').value.trim(),ref:$('sim-ref').value.trim(),track:$('sim-track').value,helper:$('helper-path').value.trim(),waypoints:$('waypoints-path').value.trim(),map_yaml:$('map-path').value.trim(),case:'lap',seed:Number($('seed').value),rate:Number($('sim-rate').value),config:{...overrideConfig}}; }
 function desiredConfig(state = latest) { return {...state.defaults,...state.setup?.config}; }
 function fillSetup(setup) {
   overrideConfig = {...(setup.config || {})};
-  const paths = {'repo-path':'repo','helper-path':'helper','waypoints-path':'waypoints','map-path':'map_yaml'};
+  const paths = {'repo-path':'repo','sim-ref':'ref','helper-path':'helper','waypoints-path':'waypoints','map-path':'map_yaml'};
   Object.entries(paths).forEach(([id,key]) => { if (setup[key] !== undefined) $(id).value = setup[key] || ''; });
   $('live-map-path').value = setup.map_yaml || '';
-  if (setup.case) $('scenario').value = setup.case;
+  if (setup.track) $('sim-track').value = setup.track;
   if (finite(setup.seed)) $('seed').value = setup.seed;
   if (finite(setup.rate)) $('sim-rate').value = setup.rate;
   fillConfig(desiredConfig());
@@ -71,10 +76,12 @@ function displayMode(next) {
   all('[data-mode]').forEach(button => { const active = button.dataset.mode === next; button.classList.toggle('active',active); button.setAttribute('aria-pressed',String(active)); });
   $('simulation-setup').hidden = next !== 'simulation'; $('simulation-controls').hidden = next !== 'simulation';
   $('live-setup').hidden = next !== 'live'; $('live-info').hidden = next !== 'live';
+  $('lap-engineer').hidden = next !== 'live';
   $('replay-setup').hidden = next !== 'replay'; $('replay-controls').hidden = next !== 'replay';
   $('map-mode-label').textContent = ({simulation:'SIMULATION',live:'LIVE CAR',replay:'RECORDED RUN'})[next] || next.toUpperCase();
   $('page-title').textContent = ({simulation:'Find your line.',live:'Understand the drive.',replay:'Revisit the moment.'})[next];
-  $('page-description').textContent = ({simulation:'See the plan. Tune the response. Compare the run.',live:'Follow the real car, its commands and the planner behind them.',replay:'Pause the run. Inspect the decisions. Keep the evidence.'})[next];
+  $('page-description').textContent = ({simulation:'Run your Lab 7 MPC controller. Tune the response. Compare the run.',live:'Follow the car. Inspect each lap. Choose the next experiment.',replay:'Pause the run. Inspect the decisions. Keep the evidence.'})[next];
+  $('map-empty-copy').textContent = ({simulation:'Connect a Lab 7 checkout and select its track, then start a simulation.',live:'Connect the ROS bridge with your full Lab 7 route. Live telemetry and lap evidence will appear here.',replay:'Load a recording to inspect its route, commands and driven trace.'})[next];
   $('chart-window').textContent = next === 'replay' ? 'Recorded telemetry · 30 s window' : 'Recent 30 seconds';
 }
 function sessionStatus(session) {
@@ -116,26 +123,27 @@ function renderDiagnostics(diagnostics) {
   $('diagnostics-panel').classList.toggle('has-issues',!!issues.length || !!missing.length);
   const clearance=d.observed_clearance_m ?? d.observed_body_clearance_m;
   const jump=d.localization_jump===true ? `Detected${finite(d.localization_jump_m)?` · ${fmt(d.localization_jump_m,2)} m`:''}` : d.localization_jump===false?'No recent jump':'Unavailable';
-  const details=[['Observed body clearance',finite(clearance)?`${fmt(clearance,3)} m`:'Unavailable'],['Planning time · p95',finite(d.planning_p95_ms)?`${fmt(d.planning_p95_ms,1)} ms`:'Unavailable'],['Localization jump',jump],['Transport age',finite(d.transport_age_s)?`${fmt(d.transport_age_s,2)} s`:'Unavailable']];
+  const details=[['Solver status',d.solver_status || 'Unknown'],['Solver duration',finite(d.solver_time_ms)?`${fmt(d.solver_time_ms,1)} ms`:'Unavailable'],['Observed body clearance',finite(clearance)?`${fmt(clearance,3)} m`:'Unavailable'],['Planning time · p95',finite(d.planning_p95_ms)?`${fmt(d.planning_p95_ms,1)} ms`:'Unavailable'],['Localization jump',jump],['Transport age',finite(d.transport_age_s)?`${fmt(d.transport_age_s,2)} s`:'Unavailable']];
   let html='<dl class="diagnostic-metrics">'+details.map(([label,value])=>`<dt>${escapeHTML(label)}</dt><dd${label==='Localization jump'&&d.localization_jump?' class="diagnostic-alert"':''}>${escapeHTML(value)}</dd>`).join('')+'</dl>';
   if(errors.length)html+='<h4 class="diagnostic-heading">Channel errors</h4><ul class="diagnostic-list diagnostic-errors">'+errors.map(([channel,error])=>`<li><strong>${escapeHTML(channel)}:</strong> ${escapeHTML(typeof error==='object'?JSON.stringify(error):error)}</li>`).join('')+'</ul>';
   const list=(title,values)=>values.length?`<h4 class="diagnostic-heading">${escapeHTML(title)}</h4><ul class="diagnostic-list">${values.map(value=>`<li>${escapeHTML(typeof value==='object'?JSON.stringify(value):value)}</li>`).join('')}</ul>`:'';
   html+=list('Missing topics',missing)+list('Stale topics',stale);
   if(d.clearance_note)html+=`<p class="diagnostic-note">${escapeHTML(d.clearance_note)}</p>`;
   if(d.route_deviation_note)html+=`<p class="diagnostic-note">${escapeHTML(d.route_deviation_note)}</p>`;
-  ['tracking_target','rejected_samples','planner_mode'].forEach(key=>{if(typeof d[key]==='string')html+=`<p class="diagnostic-note">${escapeHTML(key.replaceAll('_',' '))}: ${escapeHTML(d[key])}</p>`;});
+  ['tracking_target','planner_mode'].forEach(key=>{if(typeof d[key]==='string')html+=`<p class="diagnostic-note">${escapeHTML(key.replaceAll('_',' '))}: ${escapeHTML(d[key])}</p>`;});
+  const config=latest.session?.config;
+  if(config && finite(config.TK))html+=`<h4 class="diagnostic-heading">MPC source settings</h4><pre class="diagnostic-note">${escapeHTML(JSON.stringify(Object.fromEntries(['TK','DTK','Rk','Rdk','Qk','Qfk'].filter(key=>config[key]!==undefined).map(key=>[key,config[key]])),null,2))}</pre>`;
   html+=list('Limitations',Array.isArray(d.limitations)?d.limitations:[]);
   $('diagnostics-content').innerHTML=html;
 }
 function update(state) {
   const setup = state.setup || {}, session = state.session;
   if (!initialized) {
-    fillSetup(setup); displayMode(setup.mode || 'simulation');
+    fillSetup(setup); displayMode(setup.mode || 'live');
     if(setup.repo && setup.mode==='simulation')$('connection-settings').open=false;
     Object.entries(state.tunable_ranges || {}).forEach(([key,range])=>{
-      const factor=key==='planning_budget'?1000:1;
       const targets=[$(key),$(`${key}-number`),document.querySelector(`[data-advanced="${key}"]`)];
-      if(Array.isArray(range))targets.filter(Boolean).forEach(el=>{el.min=range[0]*factor;el.max=range[1]*factor;if(el.type==='range')paintRange(el);});
+      if(Array.isArray(range))targets.filter(Boolean).forEach(el=>{el.min=range[0];el.max=range[1];if(el.type==='range')paintRange(el);});
     });
   }
   else if (setup.mode && setup.mode !== mode && !commandCount) displayMode(setup.mode);
@@ -150,17 +158,17 @@ function update(state) {
   const diagnostics = session?.diagnostics;
   const firstChannelError=diagnostics?.errors && Object.entries(diagnostics.errors)[0];
   const channelReason=firstChannelError ? `${firstChannelError[0]}: ${typeof firstChannelError[1]==='string'?firstChannelError[1]:JSON.stringify(firstChannelError[1])}` : null;
-  const decision = typeof diagnostics === 'string' ? diagnostics : diagnostics?.stop_reason || channelReason || (diagnostics?.localization_jump ? `Localization jump detected${finite(diagnostics.localization_jump_m)?` · ${fmt(diagnostics.localization_jump_m,2)} m`:''}`:null) || diagnostics?.reason || diagnostics?.decision || diagnostics?.planner_debug?.reason || session?.reason;
+  const decision = typeof diagnostics === 'string' ? diagnostics : diagnostics?.stop_reason || channelReason || (diagnostics?.localization_jump ? `Localization jump detected${finite(diagnostics.localization_jump_m)?` · ${fmt(diagnostics.localization_jump_m,2)} m`:''}`:null) || diagnostics?.reason || diagnostics?.decision || diagnostics?.planner_debug?.reason || session?.reason || (diagnostics?.solver_status ? `MPC solver: ${diagnostics.solver_status}` : null);
   $('decision').textContent = decision || (session ? 'Decision diagnostics unavailable on this branch' : 'No telemetry yet');
   renderDiagnostics(diagnostics);
-  $('map-diagnostics').textContent = session ? (diagnostics?.note || (session.tree?.length ? 'Accepted RRT branches available · rejected samples require branch instrumentation.' : 'Extra sampling and rejection diagnostics depend on the active planner branch.')) : 'Telemetry will show what this planner branch exposes.';
+  $('map-diagnostics').textContent = session ? (diagnostics?.note || 'Full route for lap timing · MPC reference and prediction show the local horizon.') : 'MPC reference, prediction and driven trace appear as telemetry arrives.';
   $('map-empty').hidden = !!hasData(session);
   $('command-source').textContent = session?.command_arc?.length ? '· derived from command' : '· unavailable';
   const metadata = session?.metadata || {};
-  const repo = metadata.repo || setup.repo;
-  $('checkout-name').textContent = metadata.branch || (repo ? repo.split('/').filter(Boolean).at(-1) : 'No checkout connected');
+  const repo = metadata.repo || (mode==='simulation' ? setup.repo : '');
+  $('checkout-name').textContent = mode==='live' ? 'Live ROS · Lab 7 MPC' : metadata.branch || (repo ? repo.split('/').filter(Boolean).at(-1) : 'No checkout connected');
   $('checkout-name').title = repo || '';
-  $('revision').textContent = [metadata.commit?.slice(0,10),metadata.dirty ? 'uncommitted changes' : '',mode === 'replay' ? metadata.recording_name : ''].filter(Boolean).join(' · ') || (repo ? 'Active planner checkout' : '—');
+  $('revision').textContent = mode==='live' ? 'Deployed revision unverified' : [metadata.commit?.slice(0,10),metadata.dirty ? 'uncommitted changes' : '',mode === 'replay' ? metadata.recording_name : ''].filter(Boolean).join(' · ') || (repo ? 'Selected MPC source' : '—');
   const activeMismatch = session?.config && Object.entries(getConfig()).some(([key,value])=>Math.abs(value-Number(session.config[key]))>1e-7);
   const pending = dirty || activeMismatch;
   $('pending-indicator').hidden = !pending;
@@ -169,7 +177,7 @@ function update(state) {
   $('run-button').innerHTML = isRunning(session) ? 'Ⅱ <span>Pause simulation</span>' : session && !TERMINAL.has(String(session.status).toLowerCase()) ? '▶ <span>Run simulation</span>' : '▶ <span>Start simulation</span>';
   $('step-button').disabled = isRunning(session) || session?.status==='loading';
   $('run-button').disabled = session?.status==='loading'; $('apply-button').disabled = !session?.config || TERMINAL.has(session?.status) || session?.status==='loading';
-  $('active-config').innerHTML = session?.config ? `Active: <strong>${fmt(session.config.max_speed,2)} m/s</strong> · <strong>${fmt(session.config.tracking_lookahead,2)} m</strong> target${finite(diagnostics?.config_revision) ? ` · revision ${diagnostics.config_revision}` : ''}` : 'Active planner settings will appear after starting a simulation.';
+  $('active-config').innerHTML = session?.config ? `Active: <strong>${fmt(session.config.MAX_SPEED,2)} m/s</strong> max · <strong>${fmt(session.config.max_accel,2)} m/s²</strong> acceleration${finite(session.config.TK) ? ` · ${session.config.TK} steps × ${fmt(session.config.DTK,2)} s` : ''}${finite(diagnostics?.config_revision) ? ` · revision ${diagnostics.config_revision}` : ''}` : 'Active MPC settings will appear after starting a simulation.';
   const history = sampleHistory(session);
   if(finite(session?.time_s) && previousTime!==null && Number(session.time_s)<previousTime){configEvents=[];previousConfig=null;}
   if(Array.isArray(session?.events)){
@@ -217,6 +225,7 @@ function update(state) {
   $('background-button').disabled = !state.map?.image;
   if (!fitted && hasData(session)) fitView();
   if (camera.follow && session?.pose) { camera.x=Number(session.pose[0]); camera.y=Number(session.pose[1]); }
+  updateAnalysis(state.analysis || {});
   drawMap();
 }
 function renderSummary(prefix,summary) {
@@ -266,19 +275,6 @@ function deriveArc(s) {
   for(let i=0;i<=24;i++){const d=distance*i/24,lx=Math.abs(curvature)<1e-5?d:Math.sin(curvature*d)/curvature,ly=Math.abs(curvature)<1e-5?0:(1-Math.cos(curvature*d))/curvature;out.push([p[0]+Math.cos(p[2])*lx-Math.sin(p[2])*ly,p[1]+Math.sin(p[2])*lx+Math.cos(p[2])*ly]);}
   return out;
 }
-let gridCanvas, gridDataKey;
-function drawOccupancy(ctx,grid) {
-  if(!grid?.data || !grid.width || !grid.height || !finite(grid.resolution))return;
-  const key=grid.data;
-  if(key!==gridDataKey){
-    gridDataKey=key;gridCanvas=document.createElement('canvas');gridCanvas.width=grid.width;gridCanvas.height=grid.height;
-    const gc=gridCanvas.getContext('2d'),pixels=gc.createImageData(grid.width,grid.height),flat=Array.isArray(grid.data[0])?grid.data.flat():grid.data;
-    for(let y=0;y<grid.height;y++)for(let x=0;x<grid.width;x++){
-      const v=Number(flat[y*grid.width+x]),i=((grid.height-1-y)*grid.width+x)*4;if(v>0){pixels.data[i]=230;pixels.data[i+1]=139;pixels.data[i+2]=109;pixels.data[i+3]=v===1?80:Math.min(160,40+v);}else if(v<0){pixels.data[i]=108;pixels.data[i+1]=130;pixels.data[i+2]=115;pixels.data[i+3]=35;}
-    }gc.putImageData(pixels,0,0);
-  }
-  ctx.save();const [x,y,yaw=0]=grid.origin || [0,0,0];ctx.translate(x,y);ctx.rotate(yaw);ctx.scale(grid.resolution,-grid.resolution);ctx.imageSmoothingEnabled=false;ctx.drawImage(gridCanvas,0,-grid.height);ctx.restore();
-}
 function drawMap() {
   const {ctx,width,height}=setupCanvas(mapCanvas);mapWidth=width;mapHeight=height;
   const s=latest.session || {},p=poseArray(s),scale=camera.scale;
@@ -290,18 +286,16 @@ function drawMap() {
   for(let x=Math.ceil(left/step)*step;x<right;x+=step)for(let y=Math.ceil(bottom/step)*step;y<top;y+=step){ctx.beginPath();ctx.arc(x,y,.65/scale,0,Math.PI*2);ctx.fill();}
   const map=latest.map;
   if(showMap && mapReady && map?.image === mapImageSource){ctx.save();const [x,y,yaw=0]=map.origin || [0,0,0];ctx.translate(x,y);ctx.rotate(yaw);ctx.scale(map.resolution,-map.resolution);ctx.globalAlpha=.95;ctx.imageSmoothingEnabled=false;ctx.drawImage(mapImage,0,-map.height,map.width,map.height);ctx.restore();}
-  if(overlays.grid)drawOccupancy(ctx,s.grid);
   if(overlays.reference)line(ctx,s.route,colors.violet,1.6,[6,5]);
+  if(overlays.horizon)line(ctx,s.reference,'#e6b4ee',2.4,[4,3]);
   if(latest.baseline?.trace)line(ctx,latest.baseline.trace,'#eabd7250',2,[3,5]);
-  if(overlays.tree && Array.isArray(s.tree)){
-    ctx.globalAlpha=.55;
-    if(s.tree.length && Array.isArray(s.tree[0]) && s.tree[0].length===2 && finite(s.tree[0][0])) {
-      for(let i=0;i+1<s.tree.length;i+=2)line(ctx,[s.tree[i],s.tree[i+1]],'#56877b',.8);
-    } else s.tree.forEach(edge=>{if(Array.isArray(edge)&&Array.isArray(edge[0]))line(ctx,edge,'#56877b',.8);else if(Array.isArray(edge)&&edge.length>=4)line(ctx,[[edge[0],edge[1]],[edge[2],edge[3]]],'#56877b',.8);else if(edge?.start&&edge?.end)line(ctx,[edge.start,edge.end],'#56877b',.8);});ctx.globalAlpha=1;
-  }
   if(overlays.scan){ctx.fillStyle='#e3a56a';points(s.scan_hits).forEach(([x,y])=>{ctx.beginPath();ctx.arc(x,y,1.4/scale,0,Math.PI*2);ctx.fill();});}
   if(overlays.driven)line(ctx,s.trail || localTrail,'#eeeae0aa',2.1);
   if(overlays.path){line(ctx,s.path,colors.teal,2.6);const goal=point(s.goal);if(goal){ctx.strokeStyle=colors.teal;ctx.lineWidth=1.3/scale;ctx.beginPath();ctx.arc(goal[0],goal[1],5/scale,0,Math.PI*2);ctx.stroke();}}
+  if(mode==='live'){
+    const evidencePoints=selectedEvidencePoints();
+    if(evidencePoints.length){line(ctx,evidencePoints,'#eabd7240',12);line(ctx,evidencePoints,colors.amber,3.5);for(const endpoint of [evidencePoints[0],evidencePoints.at(-1)]){ctx.beginPath();ctx.arc(endpoint[0],endpoint[1],4/scale,0,Math.PI*2);ctx.fillStyle=colors.amber;ctx.fill();}}
+  }
   if(overlays.body){
     if(Array.isArray(s.footprints))s.footprints.forEach(poly=>{line(ctx,poly,colors.amber+'50',1);});
     line(ctx,s.command_arc?.length?s.command_arc:deriveArc(s),colors.amber,2,[5,3]);
@@ -314,6 +308,284 @@ function drawMap() {
   ctx.restore();
   const distance=scale<20?5:scale<50?2:scale<150?1:.5;
   $('map-scale').firstElementChild.style.width=`${distance*scale}px`;$('map-scale').lastElementChild.textContent=`${distance} m`;
+}
+
+function analysisStatus(value) {
+  return ({waiting_for_connection:'Waiting for connection',queued:'Queued',analyzing:'Analyzing',complete:'Report ready',failed:'Analysis failed',invalid:'Incomplete lap',disabled:'Analysis paused',pending:'Pending'})[value] || String(value || 'Captured').replaceAll('_',' ');
+}
+function lapData() { return lapDetail?.lap || lapDetail || {}; }
+function lapMetrics() { return lapDetail?.metrics || lapData().metrics || {}; }
+function lapEvidence() { return Array.isArray(lapMetrics().evidence) ? lapMetrics().evidence : []; }
+function selectedEvidencePoints() {
+  if(!selectedEvidenceId || !lapDetail)return [];
+  const item=lapEvidence().find(row=>String(row.id)===String(selectedEvidenceId));
+  if(!item)return [];
+  for(const key of ['points','path','trace','positions']){const p=points(item[key]);if(p.length)return p;}
+  const rows=lapDetail.samples || lapData().samples || lapMetrics().samples || [];
+  const sampled=points(rows.filter(row=>finite(row.time_s)&&Number(row.time_s)>=Number(item.start_time_s)&&Number(row.time_s)<=Number(item.end_time_s)).map(row=>row.pose || row.position));
+  if(sampled.length)return sampled;
+  const route=lapDetail.route || lapData().route || lapMetrics().route;
+  if(!Array.isArray(route) || !finite(item.route_start_m) || !finite(item.route_end_m))return [];
+  const p=points(route),out=[];let distance=0;
+  for(let i=0;i<p.length;i++){if(i)distance+=Math.hypot(p[i][0]-p[i-1][0],p[i][1]-p[i-1][1]);if(distance>=Number(item.route_start_m)&&distance<=Number(item.route_end_m))out.push(p[i]);}
+  return out;
+}
+function providerFields() {
+  const provider=$('analysis-provider').value;
+  $('analysis-url-field').hidden=provider!=='compatible';
+  $('analysis-key-field').hidden=provider==='chatgpt';
+  $('analysis-connect').hidden=provider!=='chatgpt';
+  $('analysis-provider-help').textContent=provider==='chatgpt' ? 'Connect your own ChatGPT account. Analysis uses that plan’s allowance. Other installations use their own connection.' : provider==='openai' ? 'Use your own OpenAI API key. Requests use API billing independently of a ChatGPT subscription.' : 'Use your own compatible server, including a local model endpoint. Model support and response time depend on that server.';
+}
+function analysisMessage(message,error=false) {
+  $('analysis-settings-message').textContent=message || '';
+  $('analysis-settings-message').hidden=!message;
+  $('analysis-settings-message').classList.toggle('is-error',error);
+}
+function updateAnalysis(analysis) {
+  if(mode!=='live')return;
+  const connection=analysis.connection || {},provider=connection.provider==='openai-compatible'?'compatible':connection.provider || 'chatgpt';
+  const connected=!!connection.connected;
+  $('analysis-connection-status').textContent=connected ? `${provider==='chatgpt'?'ChatGPT':provider==='openai'?'OpenAI API':'Compatible endpoint'} connected` : connection.error?'Connection needs attention':'Analysis connection needed';
+  $('analysis-connection-status').classList.toggle('connected',connected);
+  $('analysis-settings-summary').textContent=[connection.model || 'gpt-6.1-sol',connection.reasoning_effort===''?'provider default':connection.reasoning_effort || 'high',analysis.enabled===false?'paused':''].filter(Boolean).join(' · ');
+  if(!analysisSettingsDirty && !$('analysis-settings-form').contains(document.activeElement)){
+    $('analysis-provider').value=provider;
+    $('analysis-model').value=connection.model || 'gpt-6.1-sol';
+    $('analysis-effort').value=connection.reasoning_effort ?? 'high';
+    $('analysis-base-url').value=connection.base_url || '';
+    $('analysis-source-repo').value=connection.source_repo || '';
+    $('analysis-source-ref').value=connection.source_ref || '';
+    $('analysis-enabled').checked=analysis.enabled===true;
+    providerFields();
+  }
+  $('analysis-disconnect').hidden=!connected;
+  $('analysis-api-key').placeholder=connection.api_key_set?'Saved credential · leave blank to keep':'Enter your own key';
+  const account=connection.account;
+  const accountLabel=typeof account==='string'?account:account?.label || account?.email || account?.name;
+  $('analysis-account').textContent=accountLabel?`Connected account: ${accountLabel}`:'';$('analysis-account').hidden=!accountLabel;
+  $('analysis-connect').textContent=connected&&provider==='chatgpt'?'Reconnect ChatGPT':'Connect ChatGPT';
+  $('analysis-connection-status').title=accountLabel || connection.error || '';
+  const sourceStatus=connection.source_status;
+  $('analysis-source-status').textContent=sourceStatus==='local_source' ? `Local source context${connection.source_commit?` · ${connection.source_commit.slice(0,10)}`:''}. Deployed revision and effective parameters are unverified.` : sourceStatus&&sourceStatus!=='unavailable' ? (typeof sourceStatus==='string'?sourceStatus:sourceStatus.message || JSON.stringify(sourceStatus)) : 'Source context describes a local Git revision. The running car’s revision and effective parameters require separate verification.';
+  if(connected)$('analysis-signin-link').hidden=true;
+  const laps=Array.isArray(analysis.laps)?analysis.laps:[],ordered=[...laps];
+  const current=analysis.current || latest.session?.lap || {};
+  const currentNumber=current.lap_number ?? current.number;
+  $('lap-current').textContent=finite(current.current_lap_time_s ?? current.elapsed_s ?? current.lap_time_s)?`${fmt(current.current_lap_time_s ?? current.elapsed_s ?? current.lap_time_s,1)} s`:current.recording&&finite(currentNumber)?`Lap ${currentNumber}`:'—';
+  $('lap-current-note').textContent=current.disabled_reason || current.reason || current.message || (current.recording&&finite(currentNumber)?`Lap ${currentNumber} · capturing telemetry`:'Waiting for a full start-line crossing');
+  $('lap-count').textContent=laps.length;
+  const valid=laps.filter(lap=>!['invalid','incomplete','aborted'].includes(lap.status)&&finite(lap.lap_time_s));
+  $('lap-valid-count').textContent=laps.length?`${valid.length} valid · ${laps.length-valid.length} incomplete`:'Completed laps stay available';
+  const source=latest.session?.metadata?.source_session_id || current.source_session_id;
+  const candidates=valid.filter(lap=>!source || lap.source_session_id===source);
+  const best=candidates.reduce((result,lap)=>!result || Number(lap.lap_time_s)<Number(result.lap_time_s)?lap:result,null);
+  $('lap-best').textContent=best?`${fmt(best.lap_time_s,2)} s`:'—';
+  $('lap-best-note').textContent=best?`Lap ${best.lap_number} · current session`:'Build a baseline on this route';
+  $('lap-pending').textContent=analysis.pending ?? laps.filter(lap=>['queued','analyzing','waiting_for_connection'].includes(lap.analysis_status)).length;
+  $('lap-queue-note').textContent=analysis.enabled===false?'Automatic analysis paused':connected?'Reports run independently of telemetry':'Captured laps wait for a connection';
+  $('lap-library-count').textContent=`${laps.length} lap${laps.length===1?'':'s'}`;
+  if(!selectedLapId && ordered.length)selectedLapId=String(ordered[0].id);
+  const signature=JSON.stringify(ordered.map(lap=>[lap.id,lap.lap_number,lap.lap_time_s,lap.status,lap.analysis_status,lap.error])).concat(`:${selectedLapId}`);
+  if(signature!==lapListSignature){
+    lapListSignature=signature;
+    $('lap-list').innerHTML=ordered.length?ordered.map(lap=>`<button class="lap-row${String(lap.id)===selectedLapId?' selected':''}" data-lap-id="${escapeHTML(lap.id)}" aria-pressed="${String(lap.id)===selectedLapId}"><span class="lap-row-top"><strong>Lap ${escapeHTML(lap.lap_number ?? '—')}</strong><strong>${finite(lap.lap_time_s)?`${fmt(lap.lap_time_s,2)}<small> s</small>`:'—'}</strong></span><span class="lap-row-bottom"><span class="lap-status status-${['complete','failed','invalid','analyzing','queued'].includes(lap.analysis_status)?lap.analysis_status:'waiting'}">${escapeHTML(analysisStatus(lap.analysis_status || lap.status))}</span><span>${lap.status==='invalid'?'Check capture':'Inspect ↗'}</span></span></button>`).join(''):'<p class="lap-empty-help">Complete a full lap with a matching closed reference route to capture the first report.</p>';
+  }
+  const selected=laps.find(lap=>String(lap.id)===selectedLapId);
+  if(selected){
+    const key=JSON.stringify([selected.id,selected.analysis_status,selected.status,selected.error,selected.discussion_status,selected.discussion_revision]);
+    if(key!==lapDetailKey && !lapDetailRequest)fetchLap(selected.id,key);
+  }
+  updateDiscussion();
+}
+async function fetchLap(id,key='') {
+  const requested=String(id);
+  lapDetailRequest=requested;
+  if(!lapDetail || String(lapData().id)!==requested)$('lap-report').innerHTML='<div class="lap-report-empty"><h3>Loading lap evidence…</h3><p>The saved capture and report will appear here.</p></div>';
+  try {
+    const detail=await request(`/api/laps/${encodeURIComponent(requested)}`);
+    if(selectedLapId!==requested)return;
+    const summary=latest.analysis?.laps?.find(row=>String(row.id)===requested);
+    if(summary && ['queued','waiting_for_connection'].includes(detail.analysis_status)&&['queued','waiting_for_connection'].includes(summary.analysis_status))detail.analysis_status=summary.analysis_status;
+    if(String(lapData().id)===requested && Number(detail.discussion?.revision || 0)<Number(lapDetail?.discussion?.revision || 0))detail.discussion=lapDetail.discussion;
+    lapDetail=detail;lapDetailKey=key;lapReportSignature='';renderLapReport();updateDiscussion();drawMap();
+  }catch(error){if(selectedLapId===requested){lapDetailKey=key;$('lap-report').innerHTML=`<div class="lap-report-empty"><h3>Could not load this lap</h3><p>${escapeHTML(error.message)}</p><button class="small-button" data-reload-lap="true">Try again</button></div>`;}}
+  finally {lapDetailRequest=null;}
+}
+function renderLapReport() {
+  if(!lapDetail)return;
+  const lap=lapData(),metrics=lapMetrics(),report=lapDetail.report || lap.report;
+  const signature=JSON.stringify([lapDetail,selectedEvidenceId]);if(signature===lapReportSignature)return;lapReportSignature=signature;
+  const id=encodeURIComponent(selectedLapId),status=lapDetail.analysis_status || lap.analysis_status,error=lapDetail.error || lap.error;
+  const metric=(label,value,unit='')=>`<div><span class="metric-label">${escapeHTML(label)}</span><strong>${finite(value)?`${fmt(value,2)}<small> ${escapeHTML(unit)}</small>`:'—'}</strong></div>`;
+  let html=`<div class="lap-report-heading"><div><span class="eyebrow">CAPTURED PERFORMANCE</span><h3>Lap ${escapeHTML(lap.lap_number ?? '—')} <span>${escapeHTML(analysisStatus(status))}</span></h3></div><div class="lap-report-downloads"><a class="small-button" href="/api/laps/${id}/export" download>↓ Evidence</a><a class="small-button" href="/api/laps/${id}/recording" download>↓ Replay</a></div></div>`;
+  html+='<div class="lap-report-metrics">'+metric('Lap time',metrics.lap_time_s ?? lap.lap_time_s,'s')+metric('Mean speed',metrics.actual_speed_mps?.mean ?? metrics.mean_speed_m_s ?? metrics.mean_speed ?? metrics.speed_mean_m_s,'m/s')+metric('Mean route deviation',metrics.cross_track_error_m?.mean ?? metrics.mean_error_m,'m')+metric('Largest sample gap',metrics.max_sample_gap_s,'s')+'</div>';
+  if(metrics.baseline)html+=`<p class="lap-baseline-note">${finite(metrics.baseline.delta_time_s)?`${Number(metrics.baseline.delta_time_s)>0?'+':''}${fmt(metrics.baseline.delta_time_s,2)} s against the baseline lap.`:'Baseline comparison available.'} ${metrics.baseline.configuration_comparable===false?'Active configuration is unverified or differs; compare cautiously.':''}</p>`;
+  const sourceContext=lapDetail.source_context || {};
+  if(sourceContext.commit || lapDetail.model)html+=`<div class="lap-provenance">${lapDetail.model?`<span>Reviewed with ${escapeHTML(lapDetail.model)}${lapDetail.reasoning_effort?` · ${escapeHTML(lapDetail.reasoning_effort)}`:''}</span>`:''}${sourceContext.commit?`<span>Local source <code>${escapeHTML(sourceContext.commit.slice(0,10))}</code> · deployed revision unverified</span>`:''}</div>`;
+  if(lap.reason || metrics.reason)html+=`<p class="lap-report-notice">${escapeHTML(lap.reason || metrics.reason)}</p>`;
+  if(error)html+=`<div class="lap-report-notice is-error">${escapeHTML(error)}</div>`;
+  if(!report){
+    const message=({waiting_for_connection:'Evidence is saved. Connect an analysis provider to generate this lap’s report.',queued:'Evidence is saved. This lap is waiting for the analysis worker.',analyzing:'The model is reviewing this lap’s metrics and issue episodes.',invalid:'This capture does not meet the full-lap or data-quality requirements. Its evidence is still available.',failed:'The analysis did not finish. The saved evidence is available for another attempt.'})[status] || 'This lap’s evidence is saved. Enable analysis and connect a provider to generate recommendations.';
+    html+=`<p class="lap-report-notice">${escapeHTML(message)}</p>`;
+  }else{
+    html+=`<p class="lap-summary">${escapeHTML(report.summary || '')}</p>`;
+    if(Array.isArray(report.findings))html+=report.findings.map((finding,index)=>`<section class="lap-finding"><div class="lap-finding-heading"><span class="finding-number">${String(index+1).padStart(2,'0')}</span><h4>${escapeHTML(finding.title || 'Performance finding')}</h4><span class="confidence">${escapeHTML(finding.confidence || 'Unspecified')} confidence</span></div><dl><dt>Observed</dt><dd>${escapeHTML(finding.observation)}</dd><dt>Possible cause</dt><dd>${escapeHTML(finding.hypothesis)}</dd><dt>Next experiment</dt><dd>${escapeHTML(finding.recommendation)}</dd><dt>Verify with</dt><dd>${escapeHTML(finding.validation)}</dd></dl>${Array.isArray(finding.evidence_ids)&&finding.evidence_ids.length?`<div class="finding-evidence">${finding.evidence_ids.map(eid=>`<button class="small-button${String(eid)===String(selectedEvidenceId)?' selected':''}" data-evidence-id="${escapeHTML(eid)}">Evidence ${escapeHTML(eid)} ↗</button>`).join('')}</div>`:''}</section>`).join('');
+    if(Array.isArray(report.limitations)&&report.limitations.length)html+=`<details class="report-limitations"><summary>Limits of this analysis <span>⌄</span></summary><ul>${report.limitations.map(item=>`<li>${escapeHTML(item)}</li>`).join('')}</ul></details>`;
+  }
+  const sectors=Array.isArray(metrics.sectors)?metrics.sectors:[];
+  if(sectors.length)html+=`<details class="lap-sectors"><summary>Sector times <span>⌄</span></summary><div class="sector-list">${sectors.map((sector,index)=>{const delta=sector.delta_time_s ?? sector.delta_s;return `<div><span>${escapeHTML(sector.name || sector.label || `Sector ${index+1}`)}</span><strong>${fmt(sector.time_s ?? sector.elapsed_s ?? sector.duration_s,2)} s</strong><span>${finite(delta)?`${Number(delta)>0?'+':''}${fmt(delta,2)} s`:'No comparison'}</span></div>`;}).join('')}</div></details>`;
+  const evidence=lapEvidence();
+  if(evidence.length)html+=`<section class="lap-evidence"><div class="lap-evidence-heading"><h4>Recorded evidence</h4>${selectedEvidenceId?'<button class="small-button" data-clear-evidence="true">Clear highlight</button>':''}</div><div class="evidence-list">${evidence.map(item=>`<button class="evidence-row${String(item.id)===String(selectedEvidenceId)?' selected':''}" data-evidence-id="${escapeHTML(item.id)}"><span class="evidence-id">${escapeHTML(item.id)}</span><span><strong>${escapeHTML(item.description || item.title || ({lap_overview:'Lap overview',sector:'Sector performance',slow_motion:'Low-speed episode',command_speed_gap:'Command and measured speed differ',route_deviation:'Route deviation'})[item.kind] || item.kind || 'Telemetry episode')}</strong><small>${fmt(finite(item.start_time_s)&&finite(lap.start_time_s)?Number(item.start_time_s)-Number(lap.start_time_s):null,2)}–${fmt(finite(item.end_time_s)&&finite(lap.start_time_s)?Number(item.end_time_s)-Number(lap.start_time_s):null,2)} s${finite(item.route_start_m ?? item.start_progress_m)?` · ${fmt(item.route_start_m ?? item.start_progress_m,1)}–${fmt(item.route_end_m ?? item.end_progress_m,1)} m along route`:''}</small></span><span aria-hidden="true">↗</span></button>`).join('')}</div><p class="field-help">Select an episode to highlight its recorded segment on the track. Times are seconds since lap start.</p></section>`;
+  if(Array.isArray(metrics.limitations)&&metrics.limitations.length&&!report)html+=`<details class="report-limitations"><summary>Capture limitations <span>⌄</span></summary><ul>${metrics.limitations.map(item=>`<li>${escapeHTML(item)}</li>`).join('')}</ul></details>`;
+  if(!['queued','analyzing','invalid'].includes(status))html+='<div class="lap-report-footer"><button class="small-button" data-retry-lap="true">Analyze this lap again</button><span>Recommendations are experiments to review before changing the controller.</span></div>';
+  $('lap-report').innerHTML=html;
+}
+function discussionDraft(id=selectedLapId) {
+  if(!id)return null;
+  if(!discussionDrafts.has(id))discussionDrafts.set(id,{message:'',factKey:'',factValue:'',questionPrompt:'',suggestion:'',comparison:'',comparisonTouched:false,posting:false,error:'',pendingRequest:null});
+  return discussionDrafts.get(id);
+}
+function discussionData() { return lapDetail?.discussion || {status:'idle',revision:0,messages:[],confirmations:[],comparison_lap_id:null}; }
+function discussionValue(value) { return value===null || value===undefined || value===''?'Unknown':typeof value==='object'?JSON.stringify(value):String(value); }
+function discussionText(id,value) { if($(id).textContent!==value)$(id).textContent=value; }
+function discussionLabel(status) { return ({idle:'Ready',queued:'Queued',analyzing:'Reviewing',failed:'Turn failed',waiting_for_connection:'Waiting for connection'})[status] || 'Ready'; }
+function discussionProposal(proposal,messageId,index) {
+  const kind=['parameter','code','measurement'].includes(proposal.kind)?proposal.kind:'measurement';
+  const label={parameter:'Parameter experiment',code:'Code proposal',measurement:'Measurement request'}[kind];
+  let html=`<section class="discussion-proposal"><div class="discussion-proposal-heading"><span class="proposal-kind">${label}</span><h5>${escapeHTML(proposal.title || `Proposal ${index+1}`)}</h5></div><p>${escapeHTML(proposal.rationale || '')}</p>`;
+  if(kind==='parameter')html+=`<div class="proposal-parameter"><code>${escapeHTML(proposal.parameter || 'Parameter')}</code><span>${escapeHTML(discussionValue(proposal.current_value))}<i aria-hidden="true">→</i><strong>${escapeHTML(discussionValue(proposal.proposed_value))}</strong>${proposal.unit?` <small>${escapeHTML(proposal.unit)}</small>`:''}</span></div>`;
+  if(proposal.source_file || proposal.source_commit)html+=`<p class="proposal-source">${escapeHTML(proposal.source_file || 'Local source')}${proposal.source_commit?` · ${escapeHTML(proposal.source_commit)}`:''}</p>`;
+  if(proposal.diff){
+    const path=`/api/laps/${encodeURIComponent(selectedLapId)}/discussion/${encodeURIComponent(messageId)}/proposal/${encodeURIComponent(proposal.id)}.patch`;
+    html+=`<details class="proposal-diff"><summary>Review suggested patch <span aria-hidden="true">⌄</span></summary><pre>${escapeHTML(proposal.diff)}</pre>${kind==='code'&&messageId&&proposal.id?`<a class="small-button" href="${path}" download="lap-proposal.patch">↓ Download .patch</a>`:''}</details>`;
+  }
+  html+=`<dl class="proposal-validation"><dt>Validate</dt><dd>${escapeHTML(proposal.validation || 'Review the evidence before testing this proposal.')}</dd><dt>Roll back</dt><dd>${escapeHTML(proposal.rollback || 'Retain the prior configuration and source revision.')}</dd></dl>`;
+  if(Array.isArray(proposal.evidence_ids)&&proposal.evidence_ids.length)html+=`<div class="proposal-evidence">${proposal.evidence_ids.map(id=>`<button type="button" class="small-button" data-discussion-evidence="${escapeHTML(id)}">Evidence ${escapeHTML(id)} ↗</button>`).join('')}</div>`;
+  if(Array.isArray(proposal.confirmation_keys)&&proposal.confirmation_keys.length)html+=`<p class="proposal-confirmations">Uses facts confirmed for this reply: ${proposal.confirmation_keys.map(key=>`<code>${escapeHTML(key)}</code>`).join(', ')}</p>`;
+  return html+'</section>';
+}
+function renderDiscussionMessages(messages) {
+  if(!messages.length)return '<p class="discussion-intro">Start with this lap’s evidence. Your engineer can ask for missing settings before recommending a change.</p>';
+  return messages.map((message,messageIndex)=>{
+    const assistant=message.role==='assistant',response=message.response || {};
+    const content=assistant?response.message || message.content || '':message.content || '';
+    let html=`<article class="discussion-message ${assistant?'from-engineer':'from-user'}"><div class="discussion-message-heading"><span>${assistant?'Lap engineer':'You'}</span>${assistant&&message.model?`<small>${escapeHTML(message.model)}${message.reasoning_effort?` · ${escapeHTML(message.reasoning_effort)}`:''}</small>`:''}</div>${content?`<p class="discussion-message-text">${escapeHTML(content)}</p>`:''}`;
+    if(!assistant&&Array.isArray(message.confirmations)&&message.confirmations.length)html+=`<dl class="discussion-message-facts">${message.confirmations.map(fact=>`<dt>${escapeHTML(fact.key)}</dt><dd>${escapeHTML(discussionValue(fact.value))}</dd>`).join('')}</dl>`;
+    if(!assistant&&message.comparison_lap_id){const compared=latest.analysis?.laps?.find(lap=>String(lap.id)===String(message.comparison_lap_id));html+=`<p class="discussion-comparison-note">Comparison: ${compared?`Lap ${escapeHTML(compared.lap_number)} · ${fmt(compared.lap_time_s,2)} s`:'another saved lap'}</p>`;}
+    if(assistant){
+      if(Array.isArray(message.confirmation_snapshot)&&message.confirmation_snapshot.length)html+=`<details class="discussion-turn-facts"><summary>User-confirmed facts used for this reply <span aria-hidden="true">⌄</span></summary><dl class="discussion-message-facts">${message.confirmation_snapshot.map(fact=>`<dt>${escapeHTML(fact.key)}</dt><dd>${escapeHTML(discussionValue(fact.value))}</dd>`).join('')}</dl><p class="field-help">These are the historical facts used for this reply. Your current confirmations may differ.</p></details>`;
+      const questions=Array.isArray(response.questions)?response.questions:[];
+      if(questions.length)html+=`<div class="discussion-questions">${questions.map((question,questionIndex)=>`<div class="discussion-question"><strong>${escapeHTML(question.question)}</strong>${question.reason?`<p>${escapeHTML(question.reason)}</p>`:''}<div><code>${escapeHTML(question.key)}</code><button type="button" class="small-button" data-discussion-question="${messageIndex}:${questionIndex}">Answer this question ↗</button></div>${question.suggested_answer?`<small>Suggested answer to check: ${escapeHTML(discussionValue(question.suggested_answer))}</small>`:''}</div>`).join('')}</div>`;
+      if(Array.isArray(response.proposals))html+=response.proposals.map((proposal,index)=>discussionProposal(proposal,message.id,index)).join('');
+      if(Array.isArray(response.limitations)&&response.limitations.length)html+=`<details class="discussion-limitations"><summary>What remains uncertain <span aria-hidden="true">⌄</span></summary><ul>${response.limitations.map(limit=>`<li>${escapeHTML(limit)}</li>`).join('')}</ul></details>`;
+    }
+    return html+'</article>';
+  }).join('');
+}
+function updateDiscussion() {
+  const available=selectedLapId && lapDetail && String(lapData().id)===String(selectedLapId);
+  $('lap-discussion').hidden=!available;if(!available)return;
+  const data=discussionData(),draft=discussionDraft(),messages=Array.isArray(data.messages)?data.messages:[],facts=Array.isArray(data.confirmations)?data.confirmations:[];
+  const status=data.status==='queued'&&!latest.analysis?.connection?.connected?'waiting_for_connection':data.status;
+  const source=data.source_context || {};
+  discussionText('discussion-provenance',!data.source_origin?'Controller source is pinned when this discussion starts.':source.commit?`${data.source_origin==='lap_capture'?'Source captured with this lap':'Source selected when this discussion started'} · ${String(source.commit).slice(0,10)} · deployed revision unverified.`:'No pinned controller source is available for this discussion.');
+  if(discussionLapId!==selectedLapId){
+    discussionLapId=selectedLapId;discussionMessagesKey='';discussionFactsKey='';discussionComparisonKey='';discussionMessagesSource=null;discussionFactsSource=null;
+    if(!draft.comparisonTouched)draft.comparison=data.comparison_lap_id || '';
+    $('discussion-message').value=draft.message;$('discussion-fact-key').value=draft.factKey;$('discussion-fact-value').value=draft.factValue;
+    $('discussion-answer-prompt').textContent=draft.questionPrompt;$('discussion-answer-prompt').hidden=!draft.questionPrompt;
+    $('discussion-fact-value').placeholder=draft.suggestion?`Check before confirming: ${draft.suggestion}`:'Enter the value you checked';
+  }
+  const messageKey=messages===discussionMessagesSource?discussionMessagesKey:JSON.stringify([selectedLapId,messages]);
+  if(messageKey!==discussionMessagesKey){
+    const timeline=$('discussion-messages'),nearBottom=timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight<80;
+    const scroll=timeline.scrollTop;timeline.innerHTML=renderDiscussionMessages(messages);discussionMessagesKey=messageKey;
+    if(nearBottom)timeline.scrollTop=timeline.scrollHeight;else timeline.scrollTop=scroll;
+  }
+  discussionMessagesSource=messages;
+  const factKey=facts===discussionFactsSource?discussionFactsKey:JSON.stringify([selectedLapId,facts]);
+  if(factKey!==discussionFactsKey){
+    $('discussion-facts-count').textContent=`${facts.length} fact${facts.length===1?'':'s'}`;
+    $('discussion-confirmations').innerHTML=facts.length?facts.map(fact=>`<div class="discussion-fact"><span><code>${escapeHTML(fact.key)}</code><strong>${escapeHTML(discussionValue(fact.value))}</strong></span><button type="button" class="small-button" data-remove-confirmation="${escapeHTML(fact.key)}" aria-label="Remove confirmation ${escapeHTML(fact.key)}">Remove</button></div>`).join(''):'<p class="field-help">No settings have been confirmed for this lap yet.</p>';
+    discussionFactsKey=factKey;
+  }
+  discussionFactsSource=facts;
+  const comparisons=(latest.analysis?.laps || []).filter(lap=>String(lap.id)!==selectedLapId&&lap.status==='valid'&&(!lapData().route_hash||lap.route_hash===lapData().route_hash));
+  const comparisonKey=JSON.stringify([selectedLapId,comparisons.map(lap=>[lap.id,lap.lap_number,lap.lap_time_s]),draft.comparison]);
+  if(comparisonKey!==discussionComparisonKey){
+    const savedMissing=draft.comparison&&!comparisons.some(lap=>String(lap.id)===draft.comparison);
+    $('discussion-comparison').innerHTML='<option value="">No comparison lap</option>'+comparisons.map(lap=>`<option value="${escapeHTML(lap.id)}">Lap ${escapeHTML(lap.lap_number)} · ${fmt(lap.lap_time_s,2)} s · ${escapeHTML(String(lap.source_session_id || lap.id).slice(-6))}</option>`).join('')+(savedMissing?`<option value="${escapeHTML(draft.comparison)}">Previously selected lap</option>`:'');
+    $('discussion-comparison').value=draft.comparison;discussionComparisonKey=comparisonKey;
+  }
+  const busy=draft.posting||['queued','analyzing','waiting_for_connection'].includes(status),invalid=lapData().status!=='valid';
+  discussionText('discussion-status',draft.posting?'Sending…':discussionLabel(status));
+  $('discussion-status').classList.toggle('is-active',busy);
+  const message=draft.error || data.error || (status==='waiting_for_connection'?'This turn is saved and waiting for a live model connection.':status==='queued'?'Your turn is saved and queued for the lap engineer.':status==='analyzing'?'The engineer is reviewing this lap, your confirmed facts and the conversation.':invalid?'Discussion is unavailable for an incomplete or invalid lap.':'');
+  discussionText('discussion-notice',message);$('discussion-notice').hidden=!message;$('discussion-notice').classList.toggle('is-error',!!draft.error||!!data.error);
+  $('discussion-send').disabled=busy||invalid;$('discussion-confirm').disabled=busy||invalid;
+  discussionText('discussion-send',draft.posting?'Sending…':messages.length?'Send message ↗':'Start discussion ↗');
+  $('discussion-retry').hidden=status!=='failed';$('discussion-retry').disabled=busy||invalid;
+  all('[data-remove-confirmation],[data-discussion-question]').forEach(button=>button.disabled=busy||invalid);
+  $('discussion-message').disabled=invalid;$('discussion-fact-key').disabled=invalid;$('discussion-fact-value').disabled=invalid;$('discussion-comparison').disabled=invalid;
+  discussionText('discussion-compose-help',latest.analysis?.connection?.connected?'Uses your selected provider, even when automatic lap analysis is paused. A comparison is included with your next message. Confirm suggested values only after checking them.':'You can compose a turn now. It will wait for a live analysis connection; your draft stays with this lap until sent. A comparison is included with your next message.');
+}
+function discussionRequestId() {
+  if(crypto.randomUUID)return crypto.randomUUID();
+  return '10000000-1000-4000-8000-100000000000'.replace(/[018]/g,char=>(Number(char)^crypto.getRandomValues(new Uint8Array(1))[0]&15>>Number(char)/4).toString(16));
+}
+async function sendDiscussion(values,consume='message') {
+  const identifier=selectedLapId,draft=discussionDraft(identifier);
+  if(!identifier||!draft||draft.posting||lapData().status!=='valid'||['queued','analyzing','waiting_for_connection'].includes(discussionData().status))return;
+  const payload={...values,comparison_lap_id:draft.comparison || ''},signature=JSON.stringify(payload);
+  if(!draft.pendingRequest||draft.pendingRequest.signature!==signature)draft.pendingRequest={signature,payload:{...payload,idempotency_key:discussionRequestId()}};
+  const pending=draft.pendingRequest;draft.posting=true;draft.error='';updateDiscussion();
+  try {
+    const result=await request(`/api/laps/${encodeURIComponent(identifier)}/discussion`,pending.payload);
+    draft.pendingRequest=null;
+    if(consume==='message'&&draft.message.trim()===values.message){draft.message='';if(selectedLapId===identifier)$('discussion-message').value='';}
+    if(consume==='fact'){
+      const fact=values.confirmations?.[0];
+      if(fact&&draft.factKey.trim()===fact.key&&draft.factValue.trim()===fact.value){draft.factKey='';draft.factValue='';draft.questionPrompt='';draft.suggestion='';if(selectedLapId===identifier){$('discussion-fact-key').value='';$('discussion-fact-value').value='';$('discussion-answer-prompt').hidden=true;$('discussion-fact-value').placeholder='Enter the value you checked';}}
+    }
+    if(selectedLapId===identifier){if(result.discussion)lapDetail.discussion=result.discussion;lapDetailKey='';updateDiscussion();await fetchLap(identifier);}
+  }catch(error){draft.error=`${error.message} Your input is still here. Sending the same turn again will reuse its request identifier.`;}
+  finally{draft.posting=false;if(selectedLapId===identifier)updateDiscussion();}
+}
+function highlightLapEvidence(id) {
+  selectedEvidenceId=id;renderLapReport();const p=selectedEvidencePoints();
+  if(p.length){camera.follow=false;$('follow-button').setAttribute('aria-pressed','false');camera.x=p.reduce((sum,row)=>sum+row[0],0)/p.length;camera.y=p.reduce((sum,row)=>sum+row[1],0)/p.length;drawMap();notice('Evidence highlighted in amber on the track.');}
+  else notice('This evidence has no recorded map segment. Its time interval is available in the replay.');
+}
+async function saveAnalysisSettings() {
+  const provider=$('analysis-provider').value;
+  const settings={provider,model:$('analysis-model').value.trim(),reasoning_effort:$('analysis-effort').value,base_url:provider==='compatible'?$('analysis-base-url').value.trim():'https://api.openai.com/v1',source_repo:$('analysis-source-repo').value.trim(),source_ref:$('analysis-source-ref').value.trim(),enabled:$('analysis-enabled').checked};
+  const key=$('analysis-api-key').value.trim();if(key)settings.api_key=key;
+  $('analysis-api-key').value='';
+  if(!settings.model)throw new Error('Enter a model name.');
+  const result=await request('/api/analysis/settings',settings);analysisSettingsDirty=false;return result;
+}
+async function analysisAction(action) {
+  if(analysisBusy)return;analysisBusy=true;
+  $('analysis-settings-form').classList.add('busy');analysisMessage('');
+  try {
+    if(action==='save'){await saveAnalysisSettings();analysisMessage('Settings saved. Completed laps follow this analysis preference.');}
+    if(action==='connect'){
+      await saveAnalysisSettings();const result=await request('/api/analysis/connect',{});
+      const url=new URL(result.url);if(url.protocol!=='https:')throw new Error('The sign-in service returned an invalid URL.');
+      $('analysis-signin-link').href=url.href;$('analysis-signin-link').hidden=false;
+      analysisMessage('Open the sign-in link below and authorize your own ChatGPT account. Return here when it finishes.');
+    }
+    if(action==='disconnect'){await request('/api/analysis/disconnect',{});$('analysis-signin-link').hidden=true;analysisMessage('Analysis connection disconnected. Captured lap evidence remains available.');}
+    if(action==='models'){
+      if(analysisSettingsDirty)throw new Error('Save the provider settings before listing its models.');
+      const result=await request('/api/analysis/models'),models=Array.isArray(result)?result:result.models || result.data || [];
+      $('analysis-models').innerHTML=models.map(model=>`<option value="${escapeHTML(typeof model==='string'?model:model.id)}">${escapeHTML(model.display_name || model.name || '')}</option>`).join('');
+      analysisMessage(`${models.length} model${models.length===1?'':'s'} listed. Choose a model in the model field. A listing does not guarantee access for inference.`);
+    }
+    await poll();
+  }catch(error){analysisMessage(error.message,true);}
+  finally{analysisBusy=false;$('analysis-settings-form').classList.remove('busy');}
 }
 
 function drawChart(id,history,series,options={}) {
@@ -340,7 +612,7 @@ function drawChart(id,history,series,options={}) {
 
 all('[data-parameter]').forEach(el=>{paintRange(el);el.addEventListener('input',()=>{$(`${el.dataset.parameter}-number`).value=el.value;overrideConfig[el.dataset.parameter]=Number(el.value);paintRange(el);markDirty();});});
 all('[data-number]').forEach(el=>el.addEventListener('input',()=>{const range=$(el.dataset.number);range.value=el.value;overrideConfig[el.dataset.number]=Number(el.value);paintRange(range);markDirty();}));
-all('[data-advanced]').forEach(el=>el.addEventListener('input',()=>{overrideConfig[el.dataset.advanced]=Number(el.value)/(el.dataset.advanced==='planning_budget'?1000:1);markDirty();}));
+all('[data-advanced]').forEach(el=>el.addEventListener('input',()=>{overrideConfig[el.dataset.advanced]=Number(el.value);markDirty();}));
 all('[data-mode]').forEach(button=>button.addEventListener('click',async()=>{if(button.dataset.mode===mode)return; const next=button.dataset.mode; const result=await command('configure',{setup:{mode:next}});if(result){displayMode(next);fitted=false;localHistory=[];localTrail=[];$('connection-settings').open=true;}}));
 $('connect-button').addEventListener('click',async()=>{const result=await command('configure',{setup:readSetup()},'Checkout connected. Start a simulation when ready.');if(result){dirty=false;$('pending-indicator').hidden=true;$('connection-settings').open=false;fitted=false;}});
 $('empty-connect').addEventListener('click',()=>{$('connection-settings').open=true;(mode==='simulation'?$('repo-path'):mode==='replay'?$('recording-file'):$('live-connect-button')).focus();});
@@ -369,7 +641,7 @@ $('confirm-save-preset').addEventListener('click',async()=>{const name=$('preset
 $('preset-name').addEventListener('keydown',event=>{if(event.key==='Enter')$('confirm-save-preset').click();});
 $('load-preset').addEventListener('click',async()=>{const name=$('preset-select').value;if(!name){notice('Choose a saved preset first.');return;}const result=await command('preset_load',{name},`Preset “${name}” loaded. Apply it to update the planner.`);if(result){overrideConfig={...(result.config || latest.setup?.config || {})};fillConfig(result.config || desiredConfig());markDirty();}});
 $('export-params').addEventListener('click',async()=>{const config=getConfig();if(await command('configure',{setup:{config}})){overrideConfig={...config};window.location.assign('/api/preset.yaml');notice('Exported pending settings for ROS startup. The running car is unchanged.');}});
-$('baseline-save').addEventListener('click',()=>command('baseline',{},'Baseline saved. Restart the same scenario to compare.'));
+$('baseline-save').addEventListener('click',()=>command('baseline',{},'Baseline saved. Restart the same track and source revision to compare.'));
 $('baseline-clear').addEventListener('click',()=>command('clear_baseline'));
 $('download-recording').addEventListener('click',event=>{if(!latest.recording?.frames){event.preventDefault();notice('Start a run to capture telemetry before downloading.');}});
 $('recording-file').addEventListener('change',async event=>{const file=event.target.files?.[0];if(!file)return;try{showError('');const content=await file.text();await request('/api/import',{name:file.name,content});displayMode('replay');fitted=false;localHistory=[];localTrail=[];$('recording-file-name').textContent=file.name;$('connection-settings').open=false;await poll();notice(`Loaded ${file.name}.`);}catch(error){showError(error.message);}event.target.value='';});
@@ -387,4 +659,61 @@ mapCanvas.addEventListener('pointerup',()=>{drag=null;});mapCanvas.addEventListe
 mapCanvas.addEventListener('wheel',event=>{event.preventDefault();const rect=mapCanvas.getBoundingClientRect(),sx=event.clientX-rect.left-mapWidth/2,sy=event.clientY-rect.top-mapHeight/2;const wx=camera.x+sx/camera.scale,wy=camera.y-sy/camera.scale;camera.scale=Math.max(2,Math.min(800,camera.scale*Math.exp(-event.deltaY*.001)));camera.x=wx-sx/camera.scale;camera.y=wy+sy/camera.scale;camera.follow=false;$('follow-button').setAttribute('aria-pressed','false');drawMap();},{passive:false});
 new ResizeObserver(()=>{drawMap();if(initialized)update(latest);}).observe($('map-stage'));
 window.addEventListener('resize',()=>{if(initialized)update(latest);});
+$('analysis-settings-form').addEventListener('input',()=>{analysisSettingsDirty=true;});
+$('analysis-provider').addEventListener('change',()=>{analysisSettingsDirty=true;$('analysis-api-key').value='';providerFields();$('analysis-signin-link').hidden=true;});
+$('analysis-settings-form').addEventListener('submit',event=>{event.preventDefault();analysisAction('save');});
+$('analysis-connect').addEventListener('click',()=>analysisAction('connect'));
+$('analysis-disconnect').addEventListener('click',()=>analysisAction('disconnect'));
+$('analysis-models-button').addEventListener('click',()=>analysisAction('models'));
+$('lap-list').addEventListener('click',event=>{
+  const button=event.target.closest('[data-lap-id]');if(!button)return;
+  selectedLapId=button.dataset.lapId;selectedEvidenceId=null;lapDetail=null;lapDetailKey='';lapListSignature='';updateAnalysis(latest.analysis || {});
+});
+$('lap-report').addEventListener('click',async event=>{
+  const evidenceButton=event.target.closest('[data-evidence-id]');
+  if(evidenceButton)highlightLapEvidence(evidenceButton.dataset.evidenceId);
+  if(event.target.closest('[data-clear-evidence]')){selectedEvidenceId=null;renderLapReport();drawMap();}
+  if(event.target.closest('[data-reload-lap]')){lapDetailKey='';fetchLap(selectedLapId);}
+  const retry=event.target.closest('[data-retry-lap]');
+  if(retry){retry.disabled=true;try{await request(`/api/laps/${encodeURIComponent(selectedLapId)}/retry`,{});lapDetailKey='';await poll();notice('Lap analysis requested.');}catch(error){showError(error.message);retry.disabled=false;}}
+});
+$('discussion-message').addEventListener('input',()=>{const draft=discussionDraft();if(draft)draft.message=$('discussion-message').value;});
+$('discussion-fact-key').addEventListener('input',()=>{const draft=discussionDraft();if(draft){draft.factKey=$('discussion-fact-key').value;draft.questionPrompt='';$('discussion-answer-prompt').hidden=true;}});
+$('discussion-fact-value').addEventListener('input',()=>{const draft=discussionDraft();if(draft)draft.factValue=$('discussion-fact-value').value;});
+$('discussion-comparison').addEventListener('change',()=>{const draft=discussionDraft();if(draft){draft.comparison=$('discussion-comparison').value;draft.comparisonTouched=true;}});
+$('discussion-compose').addEventListener('submit',event=>{
+  event.preventDefault();const draft=discussionDraft();if(!draft)return;
+  const typed=draft.message.trim(),messages=discussionData().messages || [];
+  if(!typed&&messages.length){draft.error='Enter a question or observation to continue the discussion.';updateDiscussion();return;}
+  const message=typed || 'Review this lap’s performance and recorded evidence. Ask me which missing controller settings or observations you need confirmed, then help me choose one concrete experiment to improve lap time.';
+  sendDiscussion({message});
+});
+$('discussion-fact-form').addEventListener('submit',event=>{
+  event.preventDefault();const draft=discussionDraft();if(!draft)return;
+  const key=draft.factKey.trim(),value=draft.factValue.trim();
+  if(!/^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(key)||!value||value.length>500){draft.error='Enter a setting name and a confirmed value of at most 500 characters.';updateDiscussion();return;}
+  sendDiscussion({message:`I confirm ${key} for this lap. Reassess your recommendations using this user-confirmed value.`,confirmations:[{key,value}]},'fact');
+});
+$('lap-discussion').addEventListener('click',event=>{
+  const questionButton=event.target.closest('[data-discussion-question]');
+  if(questionButton){
+    const [messageIndex,questionIndex]=questionButton.dataset.discussionQuestion.split(':').map(Number);
+    const question=discussionData().messages?.[messageIndex]?.response?.questions?.[questionIndex],draft=discussionDraft();if(!question||!draft)return;
+    if(draft.factKey!==question.key){draft.factValue='';$('discussion-fact-value').value='';}
+    draft.factKey=String(question.key || '');draft.questionPrompt=String(question.question || '');draft.suggestion=question.suggested_answer===null||question.suggested_answer===undefined?'':String(question.suggested_answer);
+    $('discussion-fact-key').value=draft.factKey;$('discussion-answer-prompt').textContent=draft.questionPrompt;$('discussion-answer-prompt').hidden=!draft.questionPrompt;
+    $('discussion-fact-value').placeholder=draft.suggestion?`Check before confirming: ${draft.suggestion}`:'Enter the value you checked';
+    $('discussion-facts').open=true;$('discussion-fact-value').focus();
+  }
+  const remove=event.target.closest('[data-remove-confirmation]');
+  if(remove)sendDiscussion({message:`I retract my confirmation for ${remove.dataset.removeConfirmation}. Reassess proposals that relied on it.`,remove_confirmations:[remove.dataset.removeConfirmation]},'none');
+  const evidence=event.target.closest('[data-discussion-evidence]');if(evidence)highlightLapEvidence(evidence.dataset.discussionEvidence);
+});
+$('discussion-retry').addEventListener('click',async()=>{
+  const identifier=selectedLapId,draft=discussionDraft();if(!draft||draft.posting)return;
+  draft.posting=true;draft.error='';updateDiscussion();
+  try{const result=await request(`/api/laps/${encodeURIComponent(identifier)}/discussion/retry`,{});if(selectedLapId===identifier){if(result.discussion)lapDetail.discussion=result.discussion;lapDetailKey='';await fetchLap(identifier);}}
+  catch(error){draft.error=error.message;}
+  finally{draft.posting=false;if(selectedLapId===identifier)updateDiscussion();}
+});
 pollLoop();

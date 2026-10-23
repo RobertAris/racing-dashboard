@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Independent simulator setup for RobertAris' dashboard; never changes Lab 6.
+# Independent simulator setup; never changes the Lab 7 controller checkout.
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -60,7 +60,7 @@ if command -v uv >/dev/null 2>&1; then
     if [[ ! -x "$VENV/bin/python" ]]; then
         uv venv --python "${RACING_PYTHON:-3.13}" "$VENV"
     fi
-    uv pip install --python "$VENV/bin/python" -e "$GYM_ROOT" -e "$PROJECT_DIR"
+    uv pip install --python "$VENV/bin/python" -e "$GYM_ROOT" -e "$PROJECT_DIR[mpc,llm]"
 else
     SIM_PYTHON="${RACING_PYTHON:-python3}"
     command -v "$SIM_PYTHON" >/dev/null 2>&1 || { printf 'Install uv or Python 3.12+.\n' >&2; exit 1; }
@@ -68,11 +68,11 @@ else
     if [[ ! -x "$VENV/bin/python" ]]; then
         "$SIM_PYTHON" -m venv "$VENV"
     fi
-    "$VENV/bin/python" -m pip install -e "$GYM_ROOT" -e "$PROJECT_DIR"
+    "$VENV/bin/python" -m pip install -e "$GYM_ROOT" -e "$PROJECT_DIR[mpc,llm]"
 fi
 
 # Exercise source/revision checks, without triggering a lengthy JAX warmup.
 RACING_SIM_ROOT="$SIM_ROOT" "$VENV/bin/python" -B -c 'from racing_dashboard.f1tenth_helper import SIMULATOR_ACTUAL_REVISIONS; print("Pinned simulator ready:", SIMULATOR_ACTUAL_REVISIONS)'
 printf '\nInstalled dashboard and simulator in %s\n' "$VENV"
-printf 'Run: RACING_SIM_ROOT=%q %q --repo /absolute/path/to/lab6\n' "$SIM_ROOT" "$VENV/bin/racing-dashboard"
+printf 'Run: RACING_SIM_ROOT=%q %q --mode simulation --repo /absolute/path/to/lab7 --track levine --ref origin/liam-trial-2\n' "$SIM_ROOT" "$VENV/bin/racing-dashboard"
 printf 'First simulation start may take a minute while the simulator compiles.\n'

@@ -10,10 +10,10 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="RobertAris Racing Lab home"><span class="brand-icon" aria-hidden="true">R<span>↗</span></span><span><b>RobertAris</b><span class="brand-sub">RACING LAB <i>/</i> 06</span></span></a>
+    <a class="brand" href="/" aria-label="RobertAris Racing Lab home"><span class="brand-icon" aria-hidden="true">R<span>↗</span></span><span><b>RobertAris</b><span class="brand-sub">RACING LAB <i>/</i> 07</span></span></a>
     <nav class="mode-switch" aria-label="Dashboard mode">
-      <button class="mode active" data-mode="simulation" aria-pressed="true">Simulation</button>
-      <button class="mode" data-mode="live" aria-pressed="false">Live car</button>
+      <button class="mode" data-mode="simulation" aria-pressed="false">Simulation</button>
+      <button class="mode active" data-mode="live" aria-pressed="true">Live car</button>
       <button class="mode" data-mode="replay" aria-pressed="false">Replay</button>
     </nav>
     <div class="server-status"><span id="connection-dot" class="dot"></span><span id="connection-status">Connecting…</span><span class="local-tag">LOCAL</span></div>
@@ -21,7 +21,7 @@
 
   <main>
     <section class="intro">
-      <div><p class="eyebrow">PLANNER WORKBENCH</p><h1 id="page-title">Find your line.</h1><p id="page-description">See the plan. Tune the response. Compare the run.</p></div>
+      <div><p class="eyebrow">MPC WORKBENCH</p><h1 id="page-title">Understand the drive.</h1><p id="page-description">Follow the car. Inspect each lap. Choose the next experiment.</p></div>
       <div class="run-identity"><span id="checkout-name">No checkout connected</span><code id="revision">—</code></div>
     </section>
 
@@ -41,18 +41,17 @@
       <section class="map-card card" aria-label="Track map">
         <div class="card-heading"><div class="heading-label"><span class="map-symbol" aria-hidden="true">⌖</span><h2>Track view</h2><span id="frame-label" class="tag">WORLD FRAME</span></div><div class="map-controls"><button id="background-button" class="small-button" aria-pressed="true" title="Show saved map background">Map</button><button id="follow-button" class="small-button" aria-pressed="false">Follow car</button><button id="fit-button" class="small-button" title="Fit route and driven trace">Fit view</button></div></div>
         <div class="map-stage" id="map-stage">
-          <canvas id="map-canvas" aria-label="Map showing reference route, selected path, search tree, car and driven trace"></canvas>
-          <div id="map-empty" class="empty-state"><span class="empty-icon" aria-hidden="true">⌖</span><h3>Your next run starts here.</h3><p>Connect a Lab 6 checkout, then start a simulation.<br>The route, planner and driven trace will appear together.</p><button id="empty-connect" class="small-button">Open connection settings ↗</button></div>
-          <div class="map-top-label"><span class="dot"></span><span id="map-mode-label">SIMULATION</span></div>
+          <canvas id="map-canvas" aria-label="Map showing full route, MPC reference and prediction horizons, car and driven trace"></canvas>
+          <div id="map-empty" class="empty-state"><span class="empty-icon" aria-hidden="true">⌖</span><h3>Your next run starts here.</h3><p id="map-empty-copy">Connect the ROS bridge with your Lab 7 route.<br>Live telemetry and lap evidence will appear here.</p><button id="empty-connect" class="small-button">Open connection settings ↗</button></div>
+          <div class="map-top-label"><span class="dot"></span><span id="map-mode-label">LIVE CAR</span></div>
           <div id="map-scale" class="map-scale"><span></span><small>1 m</small></div>
           <div class="map-help">Drag to pan <span>·</span> Scroll to zoom</div>
         </div>
         <div class="overlay-toolbar" aria-label="Map overlays">
-          <label style="--overlay:#b79bff"><input type="checkbox" data-overlay="reference" checked><span>Reference</span></label>
+          <label style="--overlay:#b79bff"><input type="checkbox" data-overlay="reference" checked><span>Full route</span></label>
           <label style="--overlay:#f1eee5"><input type="checkbox" data-overlay="driven" checked><span>Driven</span></label>
-          <label style="--overlay:#5cd9c3"><input type="checkbox" data-overlay="path" checked><span>Selected path</span></label>
-          <label style="--overlay:#579c94"><input type="checkbox" data-overlay="tree"><span>Tree</span></label>
-          <label style="--overlay:#9aaca5"><input type="checkbox" data-overlay="grid"><span>Grid</span></label>
+          <label style="--overlay:#5cd9c3"><input type="checkbox" data-overlay="path" checked><span>MPC prediction</span></label>
+          <label style="--overlay:#e6b4ee"><input type="checkbox" data-overlay="horizon" checked><span>MPC reference</span></label>
           <label style="--overlay:#e3a56a"><input type="checkbox" data-overlay="scan"><span>Scan</span></label>
           <label style="--overlay:#eabd72"><input type="checkbox" data-overlay="body" checked><span>Body / command</span></label>
         </div>
@@ -65,27 +64,28 @@
           <details id="connection-settings" class="settings-group" open>
             <summary><span>Connection & setup</span><span class="details-chevron">⌄</span></summary>
             <div class="settings-body">
-              <div id="simulation-setup">
-                <label class="field-label" for="repo-path">Lab 6 checkout</label>
-                <input id="repo-path" type="text" spellcheck="false" autocomplete="off" placeholder="/path/to/your/lab6-checkout">
-                <p class="field-help">Loads this branch’s planner and defaults. Only edited settings become overrides.</p>
-                <details class="nested-details"><summary>Optional paths <span>⌄</span></summary><div class="settings-body"><label class="field-label" for="helper-path">Simulator helper</label><input id="helper-path" type="text" spellcheck="false" placeholder="Use bundled Lab 6 helper"><label class="field-label" for="waypoints-path">Waypoints CSV</label><input id="waypoints-path" type="text" spellcheck="false" placeholder="Use checkout defaults"><label class="field-label" for="map-path">Saved map YAML</label><input id="map-path" type="text" spellcheck="false" placeholder="Optional map background"></div></details>
-                <div class="field-row"><div><label class="field-label" for="scenario">Scenario</label><select id="scenario"><option value="lap">Track lap</option><option value="straight">Straight</option><option value="turn">Turn</option></select></div><div><label class="field-label" for="seed">Random seed</label><input id="seed" type="number" min="0" max="2147483647" step="1" value="7"></div></div>
+              <div id="simulation-setup" hidden>
+                <label class="field-label" for="repo-path">Lab 7 MPC checkout</label>
+                <input id="repo-path" type="text" spellcheck="false" autocomplete="off" placeholder="/path/to/your/lab7-checkout">
+                <p class="field-help">Runs this checkout’s MPC controller and speed profile in the local simulator.</p>
+                <label class="field-label" for="sim-ref">Git reference <span class="optional-label">optional</span></label><input id="sim-ref" type="text" spellcheck="false" autocomplete="off" placeholder="origin/liam-trial-2"><p class="field-help">Leave blank to use working files. Selecting a reference keeps your checkout in place.</p>
+                <details class="nested-details"><summary>Optional paths <span>⌄</span></summary><div class="settings-body"><label class="field-label" for="helper-path">Simulator helper</label><input id="helper-path" type="text" spellcheck="false" placeholder="Use bundled F1TENTH helper"><label class="field-label" for="waypoints-path">Full waypoints CSV</label><input id="waypoints-path" type="text" spellcheck="false" placeholder="mpc/waypoints/&lt;track&gt;.csv"><label class="field-label" for="map-path">Saved map YAML</label><input id="map-path" type="text" spellcheck="false" placeholder="Use track map"></div></details>
+                <div class="field-row"><div><label class="field-label" for="sim-track">Track</label><select id="sim-track"><option value="levine">Levine</option><option value="spielberg">Spielberg</option></select></div><div><label class="field-label" for="seed">Random seed</label><input id="seed" type="number" min="0" max="2147483647" step="1" value="7"></div></div>
                 <button id="connect-button" class="button secondary full">Connect checkout <span>↗</span></button>
               </div>
-              <div id="live-setup" hidden><p class="help-copy">Run the ROS bridge in your car’s ROS environment, then open this dashboard on your MacBook. See the README for the exact commands and topic mapping.</p><label class="field-label" for="live-map-path">Saved map YAML on dashboard host</label><input id="live-map-path" type="text" spellcheck="false" placeholder="/path/to/saved-map.yaml"><p class="field-help">Live car mode is for monitoring and recording. Tuning controls are disabled.</p><button id="live-connect-button" class="button secondary full">Listen for live telemetry</button></div>
-              <div id="replay-setup" hidden><p class="help-copy">Open a dashboard JSON recording or a Lab 6 simulator CSV to inspect the run.</p><label for="recording-file" class="button secondary full file-button">Load recording <span>↗</span></label><input id="recording-file" type="file" accept=".json,.csv,application/json,text/csv" hidden><p id="recording-file-name" class="field-help">Files are processed by this local dashboard.</p></div>
+              <div id="live-setup"><p class="help-copy">Run the ROS bridge in your car’s ROS environment with the full Lab 7 waypoint CSV. The README includes commands for MPC pose, prediction and reference topics.</p><label class="field-label" for="live-map-path">Saved map YAML on dashboard host</label><input id="live-map-path" type="text" spellcheck="false" placeholder="/path/to/saved-map.yaml"><p class="field-help">Live car mode monitors, records and analyzes completed laps.</p><button id="live-connect-button" class="button secondary full">Listen for live telemetry</button></div>
+              <div id="replay-setup" hidden><p class="help-copy">Open a dashboard JSON recording or a compatible telemetry CSV to inspect the run.</p><label for="recording-file" class="button secondary full file-button">Load recording <span>↗</span></label><input id="recording-file" type="file" accept=".json,.csv,application/json,text/csv" hidden><p id="recording-file-name" class="field-help">Files are processed by this local dashboard.</p></div>
             </div>
           </details>
 
-          <div id="simulation-controls">
+          <div id="simulation-controls" hidden>
             <div class="section-title"><h3>Tune the drive</h3><span id="pending-indicator" hidden>UNAPPLIED</span></div>
             <p id="active-config" class="active-config">Active planner settings will appear after connecting.</p>
-            <div class="parameter"><div class="parameter-label"><label for="max_speed">Maximum speed</label><div><input id="max_speed-number" aria-label="Maximum speed numeric value" data-number="max_speed" type="number" min="0.1" max="8" step="0.1" value="2.2"><span>m/s</span></div></div><input id="max_speed" data-parameter="max_speed" type="range" min="0.1" max="8" step="0.1" value="2.2"><div class="range-hints"><span>Slower</span><span>Faster</span></div></div>
-            <div class="parameter"><div class="parameter-label"><label for="tracking_lookahead">Tracking lookahead</label><div><input id="tracking_lookahead-number" aria-label="Tracking lookahead numeric value" data-number="tracking_lookahead" type="number" min="0.1" max="2" step="0.05" value="0.3"><span>m</span></div></div><input id="tracking_lookahead" data-parameter="tracking_lookahead" type="range" min="0.1" max="2" step="0.05" value="0.3"><div class="range-hints"><span>Closer target</span><span>Further target</span></div></div>
-            <details class="advanced-settings"><summary>Advanced planner settings <span>⌄</span></summary><div class="advanced-grid"><label>Goal lookahead <span>m</span><input data-advanced="goal_lookahead" type="number" min="0.1" max="20" step="0.1" value="3"></label><label>Goal bias <span>0–1</span><input data-advanced="goal_bias" type="number" min="0" max="1" step="0.05" value="0.25"></label><label>Expansion distance <span>m</span><input data-advanced="max_expansion_dist" type="number" min="0.01" max="5" step="0.05" value="0.4"></label><label>Planning budget <span>ms</span><input data-advanced="planning_budget" type="number" min="1" max="500" step="1" value="35"></label></div><p class="field-help">A larger planning budget can lower simulation throughput. Changes are validated by the active planner.</p></details>
-            <div class="apply-controls"><button id="apply-button" class="button secondary">Apply live</button><button id="restart-button" class="button secondary">Apply & restart</button></div>
-            <p id="apply-hint" class="field-help">Applied settings appear on the next planning cycle.</p>
+            <div class="parameter"><div class="parameter-label"><label for="MAX_SPEED">Maximum speed</label><div><input id="MAX_SPEED-number" aria-label="Maximum speed numeric value" data-number="MAX_SPEED" type="number" min="0.1" max="15" step="0.1" value="6"><span>m/s</span></div></div><input id="MAX_SPEED" data-parameter="MAX_SPEED" type="range" min="0.1" max="15" step="0.1" value="6"><div class="range-hints"><span>Slower</span><span>Faster</span></div></div>
+            <div class="parameter"><div class="parameter-label"><label for="max_accel">Acceleration limit</label><div><input id="max_accel-number" aria-label="Acceleration limit numeric value" data-number="max_accel" type="number" min="0.1" max="3" step="0.1" value="3"><span>m/s²</span></div></div><input id="max_accel" data-parameter="max_accel" type="range" min="0.1" max="3" step="0.1" value="3"><div class="range-hints"><span>Gentler</span><span>Stronger</span></div></div>
+            <details class="advanced-settings"><summary>Speed profile settings <span>⌄</span></summary><div class="advanced-grid"><label>Profile acceleration <span>m/s²</span><input data-advanced="profile_accel" type="number" min="0.1" max="3" step="0.1" value="1.5"></label><label>Profile deceleration <span>m/s²</span><input data-advanced="profile_decel" type="number" min="0.1" max="3" step="0.1" value="1.5"></label></div><p class="field-help">MPC horizon, time step and cost matrices come from the selected controller source. Edit those in the checkout, then reset the simulation.</p></details>
+            <div class="apply-controls"><button id="apply-button" class="button secondary">Apply in simulation</button><button id="restart-button" class="button secondary">Apply & restart</button></div>
+            <p id="apply-hint" class="field-help">Applying rebuilds MPC at the next cycle and clears its warm start. Restart also resets the car.</p>
             <div class="preset-row"><select id="preset-select" aria-label="Saved tuning preset"><option value="">Saved presets</option></select><button id="load-preset" class="small-button">Load</button><button id="save-preset" class="small-button">Save</button></div>
             <button id="export-params" class="export-button">↓ Export ROS parameters <span>.yaml</span></button>
             <div id="preset-name-row" class="preset-name-row" hidden><input id="preset-name" aria-label="New preset name" type="text" maxlength="64" placeholder="Preset name"><button id="confirm-save-preset" class="small-button">Save preset</button><button id="cancel-save-preset" class="icon-button" aria-label="Cancel saving preset">×</button></div>
@@ -94,11 +94,69 @@
           </div>
 
           <div id="replay-controls" hidden><div class="section-title"><h3>Inspect the run</h3><span id="replay-count">0 frames</span></div><div class="run-controls"><button id="replay-play" class="button primary">▶ Play recording</button><button id="replay-step" class="button icon-button" aria-label="Next recording frame">▹|</button></div><input id="replay-scrub" type="range" min="0" max="0" value="0" aria-label="Recording frame"><div class="replay-position"><span id="replay-position">Frame —</span><span id="replay-duration">—</span></div><p class="field-help">Replay shows recorded behavior. Use simulation to evaluate new parameters.</p></div>
-          <div id="live-info" hidden><div class="section-title"><h3>Live telemetry</h3></div><p class="help-copy">Check that the route and localization align with the saved map before evaluating tracking.</p><div class="live-callout"><span class="dot"></span><span id="live-message">Waiting for the ROS bridge.</span></div><p class="field-help">Missing fields remain blank. Planner decisions and sampled branches depend on the active branch’s published topics.</p></div>
+          <div id="live-info"><div class="section-title"><h3>Live telemetry</h3></div><p class="help-copy">Check that the full route and localization align with the saved map before evaluating tracking.</p><div class="live-callout"><span class="dot"></span><span id="live-message">Waiting for the ROS bridge.</span></div><p class="field-help">MPC prediction and reference are short horizons. Solver status and effective settings require dedicated controller diagnostics.</p></div>
           <details id="diagnostics-panel" class="diagnostics-panel"><summary><span>Diagnostics</span><span id="diagnostics-count">No telemetry</span><span>⌄</span></summary><div id="diagnostics-content"><p class="field-help">Connect a session to inspect available diagnostic information.</p></div></details>
         </div>
       </aside>
     </div>
+
+    <section id="lap-engineer" class="lap-engineer" aria-label="Live lap analysis" hidden>
+      <div class="section-heading"><div><p class="eyebrow">LEARN FROM EVERY LAP</p><h2>Lap engineer.</h2><p class="section-description">Measured performance. Evidence to inspect. One change to test next.</p></div><span id="analysis-connection-status" class="engineer-connection">Choose an analysis connection</span></div>
+      <div class="lap-overview card">
+        <div><span class="metric-label">CURRENT LAP</span><strong id="lap-current">—</strong><span id="lap-current-note">Waiting for a full start-line crossing</span></div>
+        <div><span class="metric-label">LAPS CAPTURED</span><strong id="lap-count">0</strong><span id="lap-valid-count">Completed laps stay available</span></div>
+        <div><span class="metric-label">BEST VALID LAP</span><strong id="lap-best">—</strong><span id="lap-best-note">Build a baseline on this route</span></div>
+        <div><span class="metric-label">ANALYSIS QUEUE</span><strong id="lap-pending">0</strong><span id="lap-queue-note">Reports run independently of telemetry</span></div>
+      </div>
+      <details id="analysis-settings" class="analysis-settings card">
+        <summary><span class="heading-label"><span class="control-symbol" aria-hidden="true">☷</span><span>Analysis connection</span></span><span id="analysis-settings-summary">GPT-6.1 Sol · high</span><span aria-hidden="true">⌄</span></summary>
+        <form id="analysis-settings-form" class="analysis-settings-body">
+          <div class="analysis-fields">
+            <label>Provider<select id="analysis-provider"><option value="chatgpt">ChatGPT plan</option><option value="openai">OpenAI API</option><option value="compatible">OpenAI-compatible endpoint</option></select></label>
+            <label>Model<input id="analysis-model" type="text" list="analysis-models" value="gpt-6.1-sol" spellcheck="false" autocomplete="off" required><datalist id="analysis-models"></datalist></label>
+            <label>Reasoning effort<select id="analysis-effort"><option value="">Provider default</option><option value="none">None</option><option value="low">Low</option><option value="medium">Medium</option><option value="high" selected>High</option><option value="xhigh">Extra high</option></select></label>
+            <label id="analysis-url-field" hidden>Base URL<input id="analysis-base-url" type="text" placeholder="http://127.0.0.1:11434/v1" spellcheck="false" autocomplete="off"></label>
+            <label id="analysis-key-field" hidden>API key<input id="analysis-api-key" type="password" placeholder="Enter your own key" autocomplete="off"><span class="field-help">Leave blank to keep the saved credential.</span></label>
+            <label class="analysis-source-field">Controller source checkout <span class="optional-label">optional</span><input id="analysis-source-repo" type="text" placeholder="/path/to/controller-checkout" spellcheck="false" autocomplete="off"></label>
+            <label>Git reference <span class="optional-label">optional</span><input id="analysis-source-ref" type="text" placeholder="origin/liam-trial-2" spellcheck="false" autocomplete="off"></label>
+          </div>
+          <div class="analysis-settings-footer"><label class="analysis-enabled"><input id="analysis-enabled" type="checkbox" checked> Analyze completed live laps automatically</label><div class="analysis-actions"><button id="analysis-models-button" type="button" class="small-button">List models</button><button id="analysis-save" type="submit" class="small-button">Save settings</button><button id="analysis-connect" type="button" class="button secondary">Connect ChatGPT</button><button id="analysis-disconnect" type="button" class="small-button" hidden>Disconnect</button></div></div>
+          <p id="analysis-provider-help" class="field-help">Connect your own ChatGPT account. Analysis uses that plan’s allowance. Other installations use their own connection.</p>
+          <p id="analysis-account" class="field-help" hidden></p>
+          <p id="analysis-source-status" class="field-help">Source context describes a local Git revision. The running car’s revision and effective parameters require separate verification.</p>
+          <p id="analysis-settings-message" class="analysis-settings-message" role="status" hidden></p>
+          <a id="analysis-signin-link" class="button primary analysis-signin-link" target="_blank" rel="noopener noreferrer" hidden>Continue with ChatGPT ↗</a>
+        </form>
+      </details>
+      <div class="lap-workspace card">
+        <aside class="lap-library" aria-label="Captured laps"><div class="lap-library-heading"><h3>Lap history</h3><span id="lap-library-count">0 laps</span></div><div id="lap-list" class="lap-list"><p class="lap-empty-help">Complete a full lap with a matching closed reference route to capture the first report.</p></div></aside>
+        <article id="lap-report" class="lap-report" aria-live="polite"><div class="lap-report-empty"><span class="empty-icon" aria-hidden="true">↗</span><h3>A lap becomes a useful experiment.</h3><p>Each completed lap gets a performance summary and a report grounded in its recorded telemetry. Select a lap here to inspect the evidence.</p></div></article>
+        <section id="lap-discussion" class="lap-discussion" aria-labelledby="discussion-title" hidden>
+          <div class="discussion-heading"><div><span class="eyebrow">TURN EVIDENCE INTO AN EXPERIMENT</span><h3 id="discussion-title">Discuss this lap.</h3><p>Ask follow-up questions, confirm the car’s settings and review a concrete proposal.</p></div><span id="discussion-status" class="discussion-status" role="status">Ready</span></div>
+          <p id="discussion-provenance" class="discussion-provenance"></p>
+          <div id="discussion-messages" class="discussion-messages" aria-live="polite"><p class="discussion-intro">Start with this lap’s evidence. Your engineer can ask for missing settings before recommending a change.</p></div>
+          <div id="discussion-notice" class="discussion-notice" role="status" hidden></div>
+          <button id="discussion-retry" type="button" class="small-button" hidden>Retry discussion turn</button>
+          <details id="discussion-facts" class="discussion-facts">
+            <summary><span>User-confirmed for this lap</span><span id="discussion-facts-count">0 facts</span><span aria-hidden="true">⌄</span></summary>
+            <p class="field-help">These are the settings and observations you explicitly confirm. They are kept with this lap; the dashboard has not verified them on the running car.</p>
+            <div id="discussion-confirmations" class="discussion-confirmations"></div>
+            <form id="discussion-fact-form" class="discussion-fact-form">
+              <p id="discussion-answer-prompt" class="discussion-answer-prompt" hidden></p>
+              <label>Setting or fact<input id="discussion-fact-key" type="text" maxlength="80" placeholder="MAX_SPEED" autocomplete="off" spellcheck="false" required></label>
+              <label>Your confirmed value<input id="discussion-fact-value" type="text" maxlength="500" placeholder="Enter the value you checked" autocomplete="off" required></label>
+              <button id="discussion-confirm" type="submit" class="small-button">Confirm and discuss</button>
+            </form>
+          </details>
+          <form id="discussion-compose" class="discussion-compose">
+            <label for="discussion-message">Ask your lap engineer</label>
+            <textarea id="discussion-message" rows="3" maxlength="6000" placeholder="Why am I losing time in the second sector? What should I check before changing the speed profile?"></textarea>
+            <div class="discussion-compose-footer"><label>Compare with <span class="optional-label">optional</span><select id="discussion-comparison"><option value="">No comparison lap</option></select></label><button id="discussion-send" type="submit" class="button secondary">Start discussion ↗</button></div>
+            <p id="discussion-compose-help" class="field-help">The discussion uses this saved lap and your selected provider. Suggested values become confirmed facts only when you submit them.</p>
+          </form>
+        </section>
+      </div>
+    </section>
 
     <section class="telemetry-section" aria-label="Performance charts">
       <div class="section-heading"><div><p class="eyebrow">THE RESPONSE</p><h2>Every command leaves a trace.</h2></div><div class="section-note"><span class="dot"></span><span id="chart-window">Recent 30 seconds</span></div></div>
@@ -115,7 +173,7 @@
       <div class="comparison-table"><div class="comparison-row comparison-head"><span>METRIC</span><span>CURRENT</span><span>BASELINE</span></div><div class="comparison-row"><span>Run status</span><strong id="metric-completion">—</strong><strong id="baseline-completion">—</strong></div><div class="comparison-row"><span>Elapsed time</span><strong id="metric-time">—</strong><strong id="baseline-time">—</strong></div><div class="comparison-row"><span>Mean route deviation</span><strong id="metric-error">—</strong><strong id="baseline-error">—</strong></div><div class="comparison-row"><span>Planning time · p95</span><strong id="metric-planning">—</strong><strong id="baseline-planning">—</strong></div></div>
       <div class="recording-panel"><span class="eyebrow">TAKE THE EVIDENCE</span><h3>Record. Inspect. Improve.</h3><p id="recording-description">0 telemetry frames captured</p><a id="download-recording" class="button secondary" href="/api/recording" download="robertaris-run.json">↓ Download recording</a><p class="field-help">Includes available telemetry and run configuration.</p></div>
     </section>
-    <footer class="page-footer"><span>RobertAris <b>RACING LAB</b></span><span>Built for Lab 6 · Runs locally · Planner stays in your checkout</span><span id="footer-version">v0.1</span></footer>
+    <footer class="page-footer"><span>RobertAris <b>RACING LAB</b></span><span>Lab 7 MPC · Local workbench · Optional model analysis</span><span id="footer-version">v0.1</span></footer>
   </main>
 </body>
 </html>

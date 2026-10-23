@@ -7,3 +7,8 @@ dist/
 runs/
 recordings/
 .DS_Store
+llm_credentials.json
+.llm_credentials.lock
+analysis_settings.json
+laps.sqlite3*
+.lap_engine.lock

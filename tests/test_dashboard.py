@@ -3,6 +3,7 @@ import io
 import json
 import math
 from pathlib import Path
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -115,14 +116,15 @@ class ServerTests(unittest.TestCase):
         self.post("/api/command", {"action": "configure", "setup": {"mode": "live"}})
         self.post("/api/live", frame(1))
         with self.assertRaises(HTTPError) as caught:
-            self.post("/api/command", {"action": "apply", "config": {"max_speed": 2}})
+            self.post("/api/command", {"action": "apply", "config": {"MAX_SPEED": 2}})
         self.assertIn("read-only", json.load(caught.exception)["error"])
         self.assertEqual(self.dashboard.state()["recording"]["frames"], 1)
 
     def test_preset_persistence_and_name_validation(self):
-        self.post("/api/command", {"action": "preset_save", "name": "gentle", "config": {"max_speed": .8}})
+        self.post("/api/command", {"action": "preset_save", "name": "gentle", "config": {"MAX_SPEED": .8}})
         reloaded = Dashboard(data_dir=self.temp.name)
-        self.assertEqual(reloaded.presets["gentle"]["max_speed"], .8)
+        self.addCleanup(reloaded.close)
+        self.assertEqual(reloaded.presets["gentle"]["MAX_SPEED"], .8)
         with self.assertRaises(ValueError):
             self.dashboard.command({"action": "preset_save", "name": "../bad", "config": {}})
 
@@ -171,11 +173,102 @@ class ServerTests(unittest.TestCase):
         self.assertIsNone(self.dashboard.state()["map"])
 
     def test_checkout_defaults_are_read_without_executing_source(self):
-        path = Path(self.temp.name) / "checkout/lab7_pkg/lab7_pkg"
-        path.mkdir(parents=True)
-        (path / "planner.py").write_text("raise RuntimeError('must not execute')\nclass PlannerConfig:\n    tracking_lookahead: float = 0.7\n")
-        defaults = checkout_defaults(path.parents[1])
-        self.assertEqual(defaults["tracking_lookahead"], .7)
+        repo = self.make_checkout()
+        defaults = checkout_defaults(repo)
+        self.assertEqual(defaults, {"MAX_SPEED": 3, "max_accel": 2.8, "profile_accel": 2.2, "profile_decel": 1.3})
+        self.assertFalse((repo/"source-executed").exists())
+        spielberg = checkout_defaults(repo, track="spielberg")
+        self.assertEqual(spielberg["MAX_SPEED"], 3.5)
+        self.assertEqual(spielberg["profile_accel"], 1.2)
+
+    def make_checkout(self):
+        repo = Path(self.temp.name)/"checkout"
+        (repo/"mpc/scripts").mkdir(parents=True)
+        (repo/"mpc/launch").mkdir()
+        (repo/"mpc/scripts/mpc_node.py").write_text(
+            "from pathlib import Path\nPath(__file__).parents[2].joinpath('source-executed').touch()\n"
+            "raise RuntimeError('must not execute')\n"
+            "class mpc_config:\n    MAX_SPEED: float = 5.0\n"
+            "class MPC:\n    def __init__(self):\n        defaults = {"
+            "'max_accel': 2.8, 'profile_accel': 1.2, 'profile_decel': 1.3, 'pose_topic': '/test'}\n")
+        (repo/"mpc/launch/levine_launch.py").write_text("raise RuntimeError('must not execute launch')\nPARAMETERS = {'MAX_SPEED': 3.0, 'profile_accel': 2.2, 'track': 'levine'}\n")
+        (repo/"mpc/launch/spielberg_launch.py").write_text("PARAMETERS = {'MAX_SPEED': 3.5, 'track': 'spielberg'}\n")
+        return repo
+
+    def test_git_ref_defaults_ignore_working_tree_and_leave_branch_unchanged(self):
+        repo = self.make_checkout()
+        def git(*args):
+            return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+        git("init", "-q")
+        git("add", ".")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-qm", "source fixture")
+        git("update-ref", "refs/remotes/origin/liam-trial-2", "HEAD")
+        branch = git("symbolic-ref", "HEAD")
+        (repo/"mpc/launch/levine_launch.py").write_text("PARAMETERS = {'MAX_SPEED': 4.0}\n")
+        self.assertEqual(checkout_defaults(repo)["MAX_SPEED"], 4)
+        self.assertEqual(checkout_defaults(repo, ref="origin/liam-trial-2")["MAX_SPEED"], 3)
+        self.assertEqual(git("symbolic-ref", "HEAD"), branch)
+        self.assertIn("4.0", (repo/"mpc/launch/levine_launch.py").read_text())
+        self.assertFalse((repo/"source-executed").exists())
+
+    def test_default_mode_and_native_mpc_parameters(self):
+        state = self.dashboard.state()
+        self.assertEqual(state["setup"]["mode"], "live")
+        self.assertEqual(state["setup"]["track"], "levine")
+        self.assertEqual(state["setup"]["ref"], "")
+        self.assertEqual(state["setup"]["control_dt"], .1)
+        self.assertEqual(state["defaults"], {"MAX_SPEED": 6, "max_accel": 3, "profile_accel": 1.5, "profile_decel": 1.5})
+
+    def test_track_and_ref_changes_refresh_defaults_and_invalidate_source(self):
+        repo = self.make_checkout()
+        self.dashboard.command({"action": "configure", "setup": {"repo": str(repo)}})
+        self.dashboard.session = frame()
+        with patch.object(self.dashboard, "_stop_worker") as stop:
+            self.dashboard.command({"action": "configure", "setup": {"track": "spielberg"}})
+        stop.assert_called_once()
+        self.assertEqual(self.dashboard.defaults["MAX_SPEED"], 3.5)
+        self.assertIsNone(self.dashboard.session)
+        with patch("racing_dashboard.server.checkout_defaults", return_value={"MAX_SPEED": 4}) as defaults:
+            self.dashboard.command({"action": "configure", "setup": {"ref": "origin/liam-trial-2"}})
+        defaults.assert_called_once_with(str(repo), "spielberg", "origin/liam-trial-2")
+        self.assertEqual(self.dashboard.defaults["MAX_SPEED"], 4)
+
+    def test_source_and_mode_changes_clear_baseline_but_config_only_preserves_it(self):
+        self.dashboard.ingest_live(frame(1))
+        self.dashboard.command({"action": "baseline"})
+        baseline = self.dashboard.baseline
+        self.assertIsNotNone(baseline)
+        self.dashboard.command({"action": "configure", "setup": {"config": {"MAX_SPEED": 2.5}}})
+        self.assertIs(self.dashboard.baseline, baseline)
+        self.dashboard.command({"action": "configure", "setup": {"track": "spielberg"}})
+        self.assertIsNone(self.dashboard.baseline)
+        for update in ({"map_yaml": "/missing/map.yaml"}, {"repo": "/different/repo"},
+                       {"ref": "origin/liam-trial-2"}, {"mode": "simulation"}):
+            with self.subTest(update=update):
+                self.dashboard.baseline = baseline
+                self.dashboard.command({"action": "configure", "setup": update})
+                self.assertIsNone(self.dashboard.baseline)
+
+    def test_invalid_track_and_ref_do_not_change_setup(self):
+        for update in ({"track": "other"}, {"track": []}, {"ref": "--output=/tmp/bad"},
+                       {"ref": "main:file.py"}, {"ref": "bad\nref"}, {"ref": 2},
+                       {"ref": "HEAD~1"}, {"ref": "main^"}, {"ref": "main+other"}):
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                self.dashboard.command({"action": "configure", "setup": update})
+        self.assertEqual(self.dashboard.setup["track"], "levine")
+        self.assertEqual(self.dashboard.setup["ref"], "")
+
+    def test_exported_preset_targets_mpc_node_with_native_parameters(self):
+        self.post("/api/command", {"action": "configure", "setup": {"config": {"MAX_SPEED": 2.5, "max_accel": 3}}})
+        with urlopen(self.url+"/api/preset.yaml") as response:
+            text = response.read().decode()
+            self.assertIn("robertaris-mpc-preset.yaml", response.headers["Content-Disposition"])
+        self.assertIn("mpc_node:", text)
+        self.assertIn("MAX_SPEED: 2.5", text)
+        self.assertIn("max_accel: 3", text)
+        self.assertNotIn("rrt_node", text)
 
 
 if __name__ == "__main__":

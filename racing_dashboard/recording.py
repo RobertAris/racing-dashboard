@@ -1,4 +1,4 @@
-"""Bounded recordings, lossless grid compression, and existing Lab 6 CSV import."""
+"""Bounded recordings, lossless grid compression, and telemetry CSV import."""
 from __future__ import annotations
 
 from array import array
@@ -122,7 +122,7 @@ class RunBuffer:
 
 def validate_recording(data):
     if not isinstance(data, dict) or data.get("format") != FORMAT or data.get("version") != 1:
-        raise ValueError("Choose a RobertAris Racing Lab recording (version 1) or a Lab 6 CSV")
+        raise ValueError("Choose a RobertAris Racing Lab recording (version 1) or a telemetry CSV")
     frames = data.get("frames")
     if not isinstance(frames, list) or not frames or len(frames) > MAX_FRAMES:
         raise ValueError("Recording must contain 1–12000 frames")
@@ -152,7 +152,7 @@ def import_csv(content, name="run.csv"):
     reader = csv.DictReader(io.StringIO(content))
     required = {"time_s", "x_m", "y_m", "yaw_rad"}
     if not reader.fieldnames or not required.issubset(reader.fieldnames):
-        raise ValueError("CSV needs time_s, x_m, y_m, yaw_rad columns (use the Lab 6 runner --log)")
+        raise ValueError("CSV needs time_s, x_m, y_m, yaw_rad columns")
     frames = []
     def number(row, key):
         return float(row[key]) if row.get(key, "").strip() else None

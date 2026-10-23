@@ -1,11 +1,14 @@
 """Meaningful adapter frame/staleness tests without installing ROS on a Mac."""
 import math
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace as NS
 import unittest
 
 from racing_dashboard.ros_adapter import (
     LiveState, RouteProjection, grid_origin, marker_points, parser, quaternion_yaw,
     transform_point, transform_pose,
+    load_route_records,
 )
 
 
@@ -74,7 +77,7 @@ class StateTests(unittest.TestCase):
     def setUp(self):
         self.clock = [10.0]
         self.lookups = []
-        options = parser().parse_args([])
+        options = parser().parse_args(["--planner-profile", "rrt"])
 
         def lookup(frame, stamp):
             self.lookups.append((frame, stamp.sec))
@@ -185,6 +188,94 @@ class StateTests(unittest.TestCase):
         invalid = self.state.snapshot()
         self.assertIsNone(invalid["cross_track_error"])
         self.assertIsNone(invalid["progress_m"])
+
+    def test_mpc_horizons_are_separate_from_full_route_and_velocity_is_magnitude(self):
+        options = parser().parse_args([])
+        self.assertEqual(options.planner_profile, "mpc")
+        self.assertEqual(options.pose_topic, "/pf/pose/odom")
+        self.assertEqual(options.drive_topic, "/drive")
+        state = LiveState(options, lambda frame, stamp: (0, 0, 0), now=lambda: self.clock[0])
+        horizon = NS(header=header(), poses=[NS(header=header(), pose=pose(1, 2)),
+                                            NS(header=header(), pose=pose(2, 2))])
+        state.update("reference", horizon, state.path)
+        state.update("path", horizon, state.path)
+        # Legacy overlays are ineligible for the default MPC lap source.
+        state.values["route"] = [[0, 0], [2, 0], [2, 2], [0, 2]]
+        message = self.odometry("map")
+        message.twist.twist.linear = NS(x=-3, y=4)
+        state.update("pose", message, state.pose)
+        snapshot = state.snapshot()
+        self.assertEqual(snapshot["actual_speed"], 5)
+        self.assertEqual(snapshot["reference"], [[1, 2], [2, 2]])
+        self.assertEqual(snapshot["route"], [])
+        self.assertFalse(snapshot["lap"]["enabled"])
+        self.assertIn("--route-file", snapshot["lap"]["disabled_reason"])
+        self.assertEqual(state.topics["path"], "/mpc/prediction")
+        self.assertEqual(state.topics["reference"], "/mpc/reference")
+        self.assertNotIn("route", state.topics)
+        self.assertFalse(any("/rrt/" in topic for topic in state.topics.values()))
+        self.assertEqual(snapshot["diagnostics"]["planner_unavailable"], {})
+        self.assertFalse(any("rejection" in message for message in snapshot["diagnostics"]["limitations"]))
+        self.clock[0] += 2
+        stale = state.snapshot()["diagnostics"]["planner_unavailable"]
+        self.assertIn("stale", stale["reference"])
+        self.assertIn("solver status is unknown", stale["path"])
+
+    def test_full_csv_preserves_yaw_speed_and_cannot_be_overwritten_by_overlay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            filename = Path(directory)/"route.csv"
+            filename.write_text("# x,y,yaw,speed\n0,0,0,2\n2,0,1.5,3\n2,2,3.1,1\n0,2,-1.5,2\n")
+            options = parser().parse_args(["--route-file", str(filename)])
+            state = LiveState(options, lambda frame, stamp: (0, 0, 0), now=lambda: self.clock[0])
+            state.values["route"] = [[50, 50], [51, 50]]
+            state.update("pose", self.odometry("map"), state.pose)
+            snapshot = state.snapshot()
+            self.assertEqual(snapshot["route"], [[0, 0], [2, 0], [2, 2], [0, 2]])
+            self.assertEqual(state.route_records[1]["speed"], 3)
+            self.assertEqual(state.route_records[1]["yaw"], 1.5)
+            self.assertTrue(snapshot["lap"]["enabled"])
+            filename.write_text("x,y,yaw,speed\n0,0,nope,2\n2,2,0,2\n")
+            with self.assertRaises(ValueError):
+                load_route_records(filename)
+
+    def test_pose_offset_is_explicit_and_original_localization_is_retained(self):
+        options = parser().parse_args(["--pose-offset-m", "0.25"])
+        state = LiveState(options, lambda frame, stamp: (0, 0, 0), now=lambda: self.clock[0])
+        message = self.odometry("map")
+        message.pose.pose = pose(1, 2, math.pi/2)
+        state.update("pose", message, state.pose)
+        self.assertEqual(state.values["pose"]["raw_pose"][:2], [1, 2])
+        self.assertAlmostEqual(state.snapshot()["pose"][1], 1.75)
+        self.assertEqual(state.snapshot()["metadata"]["pose_offset_m"], 0.25)
+
+    def test_lap_capture_runs_on_pose_samples_and_not_on_repeated_snapshots(self):
+        from tests.test_laps import ROUTE, sample
+        options = parser().parse_args(["--planner-profile", "mpc", "--lap-gate-x", "2",
+                                      "--lap-gate-y", "0", "--lap-gate-yaw", str(math.pi/2)])
+        bundles = []
+        state = LiveState(options, lambda frame, stamp: (0, 0, 0), now=lambda: self.clock[0],
+                          lap_sink=lambda bundle: bundles.append(bundle))
+        state.static_route = ROUTE
+        message = self.odometry("map")
+        for i in range(150):
+            point = sample(-0.4+i*0.05, 1+i*0.05)
+            seconds = point["time_s"]
+            message.header.stamp = NS(sec=int(seconds), nanosec=round((seconds-int(seconds))*1e9))
+            message.pose.pose = pose(*point["pose"])
+            state.update("pose", message, state.pose)
+            for _ in range(3):
+                state.snapshot()
+        self.assertEqual(len(bundles), 1)
+        self.assertEqual(bundles[0]["status"], "valid")
+        self.assertEqual(state.pose_sequence, 150)
+        count = state.laps.status()["sample_count"]
+        state.snapshot()
+        state.snapshot()
+        self.assertEqual(state.laps.status()["sample_count"], count)
+        self.clock[0] += 2
+        state.snapshot()
+        self.assertEqual(bundles[-1]["reason"], "telemetry_gap")
+        self.assertFalse(state.laps.status()["recording"])
 
 
 if __name__ == "__main__":

@@ -5,12 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "robertaris-racing-dashboard"
 version = "0.1.0"
-description = "Branch-independent F1TENTH planning, simulation tuning, and replay dashboard by RobertAris"
+description = "Lab 7 MPC telemetry, live lap engineering, and replay dashboard by RobertAris"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "RobertAris" }]
 license = { text = "MIT" }
 dependencies = ["numpy>=1.24", "Pillow>=9.0", "PyYAML>=6.0"]
+
+[project.optional-dependencies]
+llm = ["PyJWT[crypto]>=2.10,<3"]
+mpc = ["cvxpy>=1.6,<2", "osqp>=1.0,<2", "scipy>=1.13", "numba>=0.61"]
 
 [project.scripts]
 racing-dashboard = "racing_dashboard.server:main"
