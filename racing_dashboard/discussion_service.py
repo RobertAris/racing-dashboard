@@ -217,6 +217,56 @@ class LapDiscussionMixin:
         self.discussion_wake.set()
         return result
 
+    def attach_discussion_source(self, identifier):
+        """Explicitly fill a missing source pin without starting a model job.
+
+        Captured lap provenance and earlier responses remain immutable. A failed
+        turn keeps its frozen measurements/history; only its source fields change
+        so the owner can separately retry it using the newly selected source.
+        """
+        with self.lock:
+            detail = self.get(identifier)
+            if not self.active:
+                raise ValueError("Switch to Live car to attach controller source")
+            if detail["lap"]["status"] != "valid":
+                raise ValueError("Controller source can only be attached to a valid full lap discussion")
+            with self._database() as db:
+                row = db.execute("SELECT status,document FROM lap_discussions WHERE lap_id=?", (identifier,)).fetchone()
+                if not row:
+                    raise KeyError("Lap discussion not found")
+                if row["status"] in PENDING:
+                    raise ValueError("Wait for the pending reply before attaching controller source")
+                document = json.loads(row["document"])
+                if document.get("source_context", {}).get("files"):
+                    raise ValueError("This discussion already has pinned controller source")
+                source = copy.deepcopy(self.source)
+                commit = source.get("commit")
+                if (not source.get("files") or not isinstance(commit, str)
+                        or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit)):
+                    raise ValueError("Select and save a controller source Git revision before attaching it")
+                timestamp = _now()
+                pending = document.get("pending_context") if row["status"] == "failed" else None
+                previous_context_sha = hashlib.sha256(_json(pending).encode()).hexdigest() if isinstance(pending, dict) else None
+                document["source_attachment"] = {
+                    "created_at": timestamp, "after_message_count": len(document["messages"]),
+                    "previous_context_sha256": previous_context_sha,
+                    "previous_source_origin": document.get("source_origin"),
+                    "previous_source_context": copy.deepcopy(document.get("source_context", {})),
+                }
+                document["source_context"] = source
+                document["source_origin"] = "attached_after_discussion_start"
+                if isinstance(pending, dict):
+                    pending["source_context"] = copy.deepcopy(source)
+                    pending["source_origin"] = document["source_origin"]
+                    if len(_json(pending).encode()) > MAX_CONTEXT_BYTES:
+                        raise ValueError("The selected source would exceed the saved discussion context limit")
+                if len(_json(document).encode()) > MAX_DOCUMENT_BYTES:
+                    raise ValueError("The selected source would exceed the discussion archive limit")
+                db.execute("UPDATE lap_discussions SET document=?,revision=revision+1,updated_at=? WHERE lap_id=?",
+                           (_json(document), timestamp, identifier))
+                self._refresh(db)
+                return {"ok": True, "id": identifier, "discussion": self._discussion_get(db, identifier)}
+
     def discussion_patch(self, identifier, message_id, proposal_id):
         discussion = self.get(identifier)["discussion"]
         message = next((item for item in discussion["messages"] if item["id"] == message_id and item["role"] == "assistant"), None)

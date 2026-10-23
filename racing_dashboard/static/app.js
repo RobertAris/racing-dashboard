@@ -488,8 +488,15 @@ function updateDiscussion() {
   $('lap-discussion').hidden=!available;if(!available)return;
   const data=discussionData(),draft=discussionDraft(),messages=Array.isArray(data.messages)?data.messages:[],facts=Array.isArray(data.confirmations)?data.confirmations:[];
   const status=data.status==='queued'&&!latest.analysis?.connection?.connected?'waiting_for_connection':data.status;
-  const source=data.source_context || {};
-  discussionText('discussion-provenance',!data.source_origin?'Controller source is pinned when this discussion starts.':source.commit?`${data.source_origin==='lap_capture'?'Source captured with this lap':'Source selected when this discussion started'} · ${String(source.commit).slice(0,10)} · deployed revision unverified.`:'No pinned controller source is available for this discussion.');
+  const source=data.source_context || (!messages.length?lapDetail.source_context:null) || {},hasSource=Array.isArray(source.files)&&source.files.length>0;
+  const selectedSource=latest.analysis?.connection?.source_commit,sourcePending=['queued','analyzing','waiting_for_connection'].includes(status);
+  const sourceLabel=data.source_origin==='attached_after_discussion_start'?'Controller source attached after this discussion started':data.source_origin==='lap_capture'||!data.source_origin?'Source captured with this lap':'Source selected when this discussion started';
+  const sourceCopy=hasSource?`${sourceLabel}${source.commit?` · ${String(source.commit).slice(0,10)}`:''} · deployed revision unverified.${data.source_origin==='attached_after_discussion_start'?' Used for future replies; prior replies retain their original source context.':''}`:selectedSource?(messages.length?'Telemetry-only discussion. Attach the selected controller source to enable source-grounded code proposals. Previous replies remain unchanged.':'Selected controller source will be pinned when you start this discussion. Deployment remains unverified.'):(messages.length?'Telemetry-only discussion. Controller source is optional for analysis and required for code proposals. Choose a checkout and Git reference, save, then attach it here.':'Telemetry-only discussion. Controller source is optional for analysis and required for code proposals. Choose a checkout and Git reference before starting to include it.');
+  discussionText('discussion-provenance',sourceCopy);
+  $('discussion-choose-source').hidden=!!hasSource||!!selectedSource;
+  $('discussion-attach-source').hidden=!!hasSource||!messages.length||!selectedSource||sourcePending;
+  $('discussion-attach-source').disabled=draft.posting||lapData().status!=='valid';
+  discussionText('discussion-attach-source',draft.postingAction==='attach_source'?'Attaching…':'Attach selected source');
   if(discussionLapId!==selectedLapId){
     discussionLapId=selectedLapId;discussionMessagesKey='';discussionFactsKey='';discussionComparisonKey='';discussionMessagesSource=null;discussionFactsSource=null;
     if(!draft.comparisonTouched)draft.comparison=data.comparison_lap_id || '';
@@ -519,7 +526,7 @@ function updateDiscussion() {
     $('discussion-comparison').value=draft.comparison;discussionComparisonKey=comparisonKey;
   }
   const busy=draft.posting||['queued','analyzing','waiting_for_connection'].includes(status),invalid=lapData().status!=='valid';
-  discussionText('discussion-status',draft.posting?'Sending…':discussionLabel(status));
+  discussionText('discussion-status',draft.posting?(draft.postingAction==='attach_source'?'Attaching source…':'Sending…'):discussionLabel(status));
   $('discussion-status').classList.toggle('is-active',busy);
   const message=draft.error || data.error || (status==='waiting_for_connection'?'This turn is saved and waiting for a live model connection.':status==='queued'?'Your turn is saved and queued for the lap engineer.':status==='analyzing'?'The engineer is reviewing this lap, your confirmed facts and the conversation.':invalid?'Discussion is unavailable for an incomplete or invalid lap.':'');
   discussionText('discussion-notice',message);$('discussion-notice').hidden=!message;$('discussion-notice').classList.toggle('is-error',!!draft.error||!!data.error);
@@ -715,5 +722,22 @@ $('discussion-retry').addEventListener('click',async()=>{
   try{const result=await request(`/api/laps/${encodeURIComponent(identifier)}/discussion/retry`,{});if(selectedLapId===identifier){if(result.discussion)lapDetail.discussion=result.discussion;lapDetailKey='';await fetchLap(identifier);}}
   catch(error){draft.error=error.message;}
   finally{draft.posting=false;if(selectedLapId===identifier)updateDiscussion();}
+});
+$('discussion-choose-source').addEventListener('click',()=>{
+  $('analysis-settings').open=true;
+  $('analysis-settings').scrollIntoView({block:'center',behavior:'auto'});
+  $('analysis-source-repo').focus();
+  analysisMessage((discussionData().messages || []).length?'Choose the controller checkout on the dashboard host and a Git reference, then save. Return to this lap and click Attach selected source. Attaching does not request a model reply.':'Choose the controller checkout on the dashboard host and a Git reference, then save. Start this lap’s discussion to include the selected source.');
+});
+$('discussion-attach-source').addEventListener('click',async()=>{
+  const identifier=selectedLapId,draft=discussionDraft();
+  if(!identifier||!draft||draft.posting||['queued','analyzing','waiting_for_connection'].includes(discussionData().status))return;
+  draft.posting=true;draft.postingAction='attach_source';draft.error='';updateDiscussion();
+  try{
+    const result=await request(`/api/laps/${encodeURIComponent(identifier)}/discussion/source`,{});
+    if(selectedLapId===identifier){if(result.discussion)lapDetail.discussion=result.discussion;lapDetailKey='';updateDiscussion();await fetchLap(identifier);}
+    notice('Controller source attached. No model reply was requested. Retry the failed turn or send a new message when ready.');
+  }catch(error){draft.error=error.message;}
+  finally{draft.posting=false;draft.postingAction=null;if(selectedLapId===identifier)updateDiscussion();}
 });
 pollLoop();

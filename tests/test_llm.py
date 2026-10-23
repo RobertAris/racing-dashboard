@@ -336,6 +336,62 @@ class ConnectionTests(unittest.TestCase):
                     strict_objects(value)
         strict_objects(DISCUSSION_SCHEMA)
 
+    def test_responses_selects_final_phase_without_concatenating_commentary_or_other_items(self):
+        self.connect_fixture()
+        serialized = json.dumps(DISCUSSION)
+        final = {"type": "message", "role": "assistant", "phase": "final_answer", "status": "completed",
+                 "content": [{"type": "output_text", "text": serialized[:25]},
+                             {"type": "output_text", "text": serialized[25:]}]}
+        response = {"status": "completed", "output": [
+            {"type": "reasoning", "content": [{"type": "output_text", "text": "not a final response"}]},
+            {"type": "message", "role": "user", "phase": "final_answer",
+             "content": [{"type": "output_text", "text": "not the assistant"}]},
+            {"type": "message", "role": "assistant", "phase": "commentary", "status": "completed",
+             "content": [{"type": "output_text", "text": "I will check the slow sector and the active speed cap."}]},
+            final,
+            {"type": "function_call", "content": [{"type": "output_text", "text": "ignore this item"}]},
+        ]}
+        with patch.object(self.connection, "_request", return_value=response):
+            self.assertEqual(self.connection.discuss({}), DISCUSSION)
+        # Initial lap analysis uses the same extraction path and strict validator.
+        response["output"][3] = {**final, "content": [{"type": "output_text", "text": json.dumps(REPORT)}]}
+        with patch.object(self.connection, "_request", return_value=response):
+            self.assertEqual(self.connection.analyze({}), REPORT)
+
+    def test_responses_uses_last_final_or_last_legacy_unphased_message(self):
+        self.connect_fixture()
+        legacy = completion(DISCUSSION)["output"][0]  # Legacy fixture omits role/phase/status.
+        first = {**legacy, "content": [{"type": "output_text", "text": "Earlier draft"}]}
+        for items in ([first, legacy],
+                      [{**first, "phase": "commentary"}, legacy],
+                      [{**first, "phase": "final_answer"}, {**legacy, "phase": "final_answer"}],
+                      [{**legacy, "phase": "final_answer"}, first]):
+            with self.subTest(items=items), patch.object(self.connection, "_request", return_value={"status": "completed", "output": items}):
+                self.assertEqual(self.connection.discuss({}), DISCUSSION)
+
+    def test_responses_rejects_selected_empty_refusal_incomplete_and_malformed_final(self):
+        self.connect_fixture()
+        good = {**completion(DISCUSSION)["output"][0], "phase": "final_answer", "role": "assistant"}
+        cases = [({**good, "content": []}, "empty final"),
+                 ({**good, "content": [{"type": "output_text", "text": "  "}]}, "empty final"),
+                 ({**good, "content": [{"type": "refusal", "refusal": "private provider explanation"}]}, "declined"),
+                 ({**good, "status": "incomplete"}, "did not complete"),
+                 ({**good, "status": "in_progress"}, "did not complete"),
+                 ({**good, "content": [{"type": "output_text", "text": "Preamble " + json.dumps(DISCUSSION)}]}, "not valid JSON"),
+                 ({**good, "content": [{"type": "output_text", "text": "```json\n" + json.dumps(DISCUSSION) + "\n```"}]}, "not valid JSON"),
+                 ({**good, "content": [{"type": "output_text", "text": '{"message":'}]}, "not valid JSON")]
+        for selected, message in cases:
+            # A valid earlier final must not hide a failed/empty newer answer.
+            with self.subTest(message=message), patch.object(self.connection, "_request", return_value={"status": "completed", "output": [good, selected]}):
+                with self.assertRaisesRegex(LLMError, message) as caught:
+                    self.connection.discuss({})
+                self.assertNotIn("private provider explanation", str(caught.exception))
+        untyped = {key: value for key, value in good.items() if key != "type"}
+        for items in ([], [untyped], [{**good, "phase": "commentary"}], [{**good, "role": "user"}]):
+            with self.subTest(items=items), patch.object(self.connection, "_request", return_value={"status": "completed", "output": items}):
+                with self.assertRaisesRegex(LLMError, "without a final"):
+                    self.connection.discuss({})
+
     def test_compatible_discussion_uses_chat_completion_schema_and_own_provider(self):
         self.connection.configure({"provider": "compatible", "model": "chosen-model", "base_url": "https://example.test/v1",
                                    "api_key": "own-key", "reasoning_effort": ""})
@@ -428,6 +484,33 @@ class ConnectionTests(unittest.TestCase):
             with self.subTest(events=events), self.assertRaises(LLMError) as caught:
                 LLMConnection._read_stream(sse(events))
             self.assertNotIn("private-token", str(caught.exception))
+
+    def test_stream_accepts_complete_terminal_frame_at_eof_without_blank_separator(self):
+        response = completion(DISCUSSION)
+        response["output"][0]["phase"] = "final_answer"
+        events = [{"type": "response.output_text.delta", "delta": "untrusted partial"},
+                  {"type": "response.completed", "response": response}]
+        wire = sse(events).getvalue()
+        for suffix in (b"\n\n", b"\n", b""):
+            with self.subTest(suffix=suffix):
+                stream = io.BytesIO(wire.rstrip(b"\n") + suffix)
+                self.assertEqual(LLMConnection._read_stream(stream), response)
+
+    def test_stream_eof_never_promotes_fragments_done_or_output_item_to_response_completion(self):
+        final = {**completion(DISCUSSION)["output"][0], "phase": "final_answer", "status": "completed"}
+        cases = [sse([{"type": "response.output_text.delta", "delta": json.dumps(DISCUSSION)}]).getvalue(),
+                 sse([{"type": "response.output_text.done", "text": json.dumps(DISCUSSION)}]).getvalue(),
+                 sse([{"type": "response.output_item.done", "item": final, "output_index": 0}]).getvalue(),
+                 b"data: [DONE]", b'data: {"type":"response.completed","response":']
+        for wire in cases:
+            with self.subTest(wire=wire[:100]), self.assertRaises(LLMError):
+                LLMConnection._read_stream(io.BytesIO(wire.rstrip(b"\n")))
+        # A populated terminal response is authoritative; completed-item events
+        # are not a fallback for an empty final response that needs investigation.
+        empty = {"status": "completed", "output": []}
+        self.assertEqual(LLMConnection._read_stream(sse([
+            {"type": "response.output_item.done", "item": final, "output_index": 0},
+            {"type": "response.completed", "response": empty}])), empty)
 
     def test_redirects_disabled_http_errors_sanitized_and_empty_revocation_accepted(self):
         self.assertIsNone(_NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.test"))

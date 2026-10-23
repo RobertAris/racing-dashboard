@@ -685,6 +685,10 @@ class Handler(BaseHTTPRequestHandler):
                     result = dashboard.analysis.discuss(identifier, request)
                 elif len(parts) == 6 and parts[5] == "retry":
                     result = dashboard.analysis.retry_discussion(identifier)
+                elif len(parts) == 6 and parts[5] == "source":
+                    if not isinstance(request, dict) or request:
+                        raise ValueError("Source attachment requires an empty JSON object")
+                    result = dashboard.analysis.attach_discussion_source(identifier)
                 else:
                     self.send_json({"ok": False, "error": "Unknown discussion endpoint"}, 404)
                     return

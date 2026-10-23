@@ -38,6 +38,13 @@ class RoutingAnalysis:
             raise KeyError(identifier)
         return {"ok": True, "id": identifier, "discussion": {"status": "queued"}}
 
+    def attach_discussion_source(self, identifier):
+        self.calls.append(("source", identifier))
+        if identifier == "missing":
+            raise KeyError(identifier)
+        return {"ok": True, "id": identifier,
+                "discussion": {"status": "idle", "source_origin": "attached_after_discussion_start"}}
+
     def discussion_patch(self, identifier, message_id, proposal_id):
         self.calls.append(("patch", identifier, message_id, proposal_id))
         if "missing" in (identifier, message_id, proposal_id):
@@ -64,11 +71,22 @@ class DiscussionRoutingTests(unittest.TestCase):
         with urlopen(request, timeout=3) as response:
             return (response.read().decode(), dict(response.headers)) if raw else json.load(response)
 
-    def test_discussion_and_retry_route_to_separate_service_operations(self):
+    def test_discussion_retry_and_source_route_to_separate_service_operations(self):
         body = {"message": "Could this be the reference speed cap?"}
         self.assertTrue(self.request("/api/laps/session%3A1/discussion", body)["ok"])
         self.assertTrue(self.request("/api/laps/session%3A1/discussion/retry", {})["ok"])
-        self.assertEqual(self.analysis.calls, [("discuss", "session:1", body), ("retry", "session:1")])
+        self.assertTrue(self.request("/api/laps/session%3A1/discussion/source", {})["ok"])
+        self.assertEqual(self.analysis.calls, [("discuss", "session:1", body), ("retry", "session:1"), ("source", "session:1")])
+
+    def test_source_attachment_requires_empty_object_and_returns_missing_resource_404(self):
+        for body in ({"source_repo": "/other"}, {"message": "Retry now"}, []):
+            with self.subTest(body=body), self.assertRaises(HTTPError) as error:
+                self.request("/api/laps/session/discussion/source", body)
+            self.assertEqual(error.exception.code, 400)
+        self.assertEqual(self.analysis.calls, [])
+        with self.assertRaises(HTTPError) as error:
+            self.request("/api/laps/missing/discussion/source", {})
+        self.assertEqual(error.exception.code, 404)
 
     def test_patch_download_is_a_fixed_name_attachment_and_does_not_apply(self):
         content, headers = self.request("/api/laps/session%3A1/discussion/message-1/proposal/proposal-1.patch", raw=True)
@@ -110,7 +128,7 @@ class DiscussionRoutingTests(unittest.TestCase):
         self.assertEqual(self.analysis.calls, [])
 
     def test_host_and_origin_guards_cover_paid_operations_and_patch_download(self):
-        for endpoint in ("/api/laps/session/discussion", "/api/laps/session/discussion/retry"):
+        for endpoint in ("/api/laps/session/discussion", "/api/laps/session/discussion/retry", "/api/laps/session/discussion/source"):
             for headers in ({"Host": "untrusted.example"}, {"Origin": "https://untrusted.example"}):
                 with self.subTest(endpoint=endpoint, headers=headers), self.assertRaises(HTTPError) as error:
                     self.request(endpoint, {}, headers)
@@ -266,6 +284,32 @@ class DiscussionWorkflowTests(unittest.TestCase):
         discussion = self.wait_discussion(messages=2)
         self.assertEqual(len([m for m in discussion["messages"] if m["role"] == "user"]), 1)
         self.assertEqual(len(self.connection.requests), 2)
+
+    def test_attach_source_updates_failed_context_without_inference_until_explicit_retry(self):
+        self.request("/api/laps", self.item)
+        capture = self.request(self.path)
+        self.connection.fail = True
+        self.request(self.path+"/discussion", {"message": "Explain this lap"})
+        failed = self.wait_discussion("failed")
+        source = {"commit": "a"*40, "files": [{"path": "mpc/scripts/mpc_node.py", "content": "x = 1\n"}]}
+        self.dashboard.analysis.source = copy.deepcopy(source)
+        attached = self.request(self.path+"/discussion/source", {})["discussion"]
+        self.assertEqual(len(self.connection.requests), 1)
+        self.assertEqual(attached["status"], "failed")
+        self.assertEqual(attached["error"], failed["error"])
+        self.assertEqual(attached["messages"], failed["messages"])
+        self.assertEqual(attached["source_context"], source)
+        self.assertEqual(attached["source_origin"], "attached_after_discussion_start")
+        self.assertEqual(self.request(self.path)["source_context"], capture["source_context"])
+        with self.assertRaises(HTTPError) as error:
+            self.request(self.path+"/discussion/source", {})
+        self.assertEqual(error.exception.code, 400)
+        self.connection.fail = False
+        self.request(self.path+"/discussion/retry", {})
+        self.wait_discussion(messages=2)
+        self.assertEqual(len(self.connection.requests), 2)
+        self.assertEqual(self.connection.requests[-1]["source_context"], source)
+        self.assertEqual(self.request(self.path)["source_context"], capture["source_context"])
 
     def test_manual_discussion_preserves_a_previously_generated_lap_report(self):
         self.request("/api/analysis/settings", {"enabled": True})

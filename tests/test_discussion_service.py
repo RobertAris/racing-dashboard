@@ -1,5 +1,6 @@
 """Durable manual discussions stay independent of live telemetry and reports."""
 import copy
+import hashlib
 import json
 import tempfile
 import threading
@@ -229,6 +230,81 @@ class DiscussionServiceTests(unittest.TestCase):
         self.service.close()
         self.service = AnalysisService(self.temp.name, connection=self.connection, active=False)
         self.assertEqual(self.service.get(self.item["id"])["discussion"]["messages"], exported["discussion"]["messages"])
+
+    def test_explicit_attachment_preserves_failed_turn_then_retry_uses_selected_source(self):
+        self.send()
+        self.connection.invalid = True
+        self.service.discuss(self.item["id"], {"message": "Review the settings without assuming them"})
+        before = self.wait_reply(expected="failed")
+        capture_source = self.service.get(self.item["id"])["source_context"]
+        with self.service.lock, self.service._database() as db:
+            pending_before = json.loads(db.execute("SELECT document FROM lap_discussions WHERE lap_id=?",
+                                                  (self.item["id"],)).fetchone()[0])["pending_context"]
+        source = {"commit": "a"*40, "files": [{"path": "mpc/scripts/mpc_node.py", "content": "x = 1\n"}]}
+        self.service.source = copy.deepcopy(source)
+        calls = len(self.connection.discussions)
+        attached = self.service.attach_discussion_source(self.item["id"])["discussion"]
+        self.assertEqual(len(self.connection.discussions), calls)
+        self.assertEqual(attached["status"], "failed")
+        self.assertEqual(attached["error"], before["error"])
+        self.assertEqual(attached["messages"], before["messages"])
+        self.assertEqual(attached["confirmations"], before["confirmations"])
+        self.assertEqual(attached["source_origin"], "attached_after_discussion_start")
+        self.assertEqual(attached["source_attachment"]["after_message_count"], len(before["messages"]))
+        expected_hash = hashlib.sha256(json.dumps(pending_before, allow_nan=False, separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(attached["source_attachment"]["previous_context_sha256"], expected_hash)
+        self.assertEqual(self.service.get(self.item["id"])["source_context"], capture_source)
+        with self.service.lock, self.service._database() as db:
+            pending_after = json.loads(db.execute("SELECT document FROM lap_discussions WHERE lap_id=?",
+                                                 (self.item["id"],)).fetchone()[0])["pending_context"]
+        for field in set(pending_before)-{"source_context", "source_origin"}:
+            self.assertEqual(pending_after[field], pending_before[field])
+        self.assertEqual(pending_after["source_context"], source)
+        self.service.source["files"][0]["content"] = "x = 999\n"
+        self.assertEqual(self.service.get(self.item["id"])["discussion"]["source_context"], source)
+        self.service.close()
+        self.service = AnalysisService(self.temp.name, connection=self.connection, active=True)
+        restored = self.service.get(self.item["id"])["discussion"]
+        self.assertEqual(restored["source_attachment"], attached["source_attachment"])
+        self.assertEqual(restored["messages"], before["messages"])
+        self.connection.invalid = False
+        self.service.retry_discussion(self.item["id"])
+        completed = self.wait_reply()
+        self.assertEqual(self.connection.discussions[-1]["source_context"], source)
+        self.assertEqual(len(completed["messages"]), len(before["messages"])+1)
+        self.assertEqual(completed["messages"][1]["context_sha256"], before["messages"][1]["context_sha256"])
+        self.assertEqual(self.service.get(self.item["id"])["source_context"], capture_source)
+
+    def test_source_attachment_requires_existing_idle_unpinned_discussion_and_valid_selection(self):
+        with self.assertRaises(KeyError):
+            self.service.attach_discussion_source(self.item["id"])
+        with self.assertRaises(KeyError):
+            self.service.attach_discussion_source("missing")
+        self.send()
+        with self.assertRaisesRegex(ValueError, "Select and save"):
+            self.service.attach_discussion_source(self.item["id"])
+        self.service.source = {"commit": "a"*40, "files": [{"path": "mpc/scripts/mpc_node.py", "content": "x = 1\n"}]}
+        self.service.set_active(False)
+        with self.assertRaisesRegex(ValueError, "Live car"):
+            self.service.attach_discussion_source(self.item["id"])
+        self.service.set_active(True)
+        self.connection.discussion_block = True
+        self.connection.discussion_started.clear()
+        self.service.discuss(self.item["id"], {"message": "One more question"})
+        self.assertTrue(self.connection.discussion_started.wait(2))
+        with self.assertRaisesRegex(ValueError, "pending reply"):
+            self.service.attach_discussion_source(self.item["id"])
+        self.connection.discussion_release.set()
+        self.wait_reply()
+        attached = self.service.attach_discussion_source(self.item["id"])["discussion"]
+        self.assertEqual(attached["status"], "idle")
+        with self.assertRaisesRegex(ValueError, "already has pinned"):
+            self.service.attach_discussion_source(self.item["id"])
+        invalid = lap(2)
+        invalid["status"], invalid["reason"] = "invalid", "sample_gap"
+        self.service.ingest(invalid)
+        with self.assertRaisesRegex(ValueError, "valid full lap"):
+            self.service.attach_discussion_source(invalid["id"])
 
     def test_retention_keeps_failed_turn_for_retry_then_cascades_finished_discussion(self):
         self.service.retention = 1

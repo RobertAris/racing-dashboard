@@ -114,7 +114,7 @@ def _error_status(status):
 
 
 def _stream_error(code):
-    if code in {"subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable"}:
+    if isinstance(code, str) and code in {"subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable"}:
         return "ChatGPT plan usage is unavailable or its limit was reached. Review ChatGPT Settings → Usage."
     return "The provider did not complete the analysis. Retry or check the selected model."
 
@@ -143,6 +143,45 @@ def validate_report(report):
                 or any(not isinstance(x, str) or not x or len(x) > 200 for x in ids)):
             raise LLMError("Every finding must cite valid evidence identifiers.")
     return report
+
+
+def _final_output_text(response):
+    """Select the final assistant message, preserving its content-part order.
+
+    Commentary and final answers are separate Responses output items. Joining
+    messages together corrupts structured JSON when a model emits a preamble.
+    Older responses may omit phase (and some compatible fixtures omit role).
+    """
+    items = response.get("output", [])
+    if not isinstance(items, list):
+        raise LLMError("The provider returned an invalid final response structure.")
+    messages = [item for item in items if isinstance(item, dict)
+                and item.get("type") == "message"
+                and item.get("role", "assistant") == "assistant"]
+    finals = [item for item in messages if item.get("phase") == "final_answer"]
+    candidates = finals or [item for item in messages if item.get("phase") is None]
+    if not candidates:
+        raise LLMError("The provider completed without a final assistant answer.")
+    selected = candidates[-1]
+    if selected.get("status") not in (None, "completed"):
+        raise LLMError("The provider did not complete its final assistant answer.")
+    content = selected.get("content", [])
+    if not isinstance(content, list):
+        raise LLMError("The provider returned invalid final answer content.")
+    chunks = []
+    for part in content:
+        if not isinstance(part, dict):
+            raise LLMError("The provider returned invalid final answer content.")
+        if part.get("type") == "refusal":
+            raise LLMError("The model declined to produce a lap report.")
+        if part.get("type") == "output_text":
+            if not isinstance(part.get("text"), str):
+                raise LLMError("The provider returned invalid final answer text.")
+            chunks.append(part["text"])
+    output = "".join(chunks)
+    if not output.strip():
+        raise LLMError("The provider completed with an empty final assistant answer.")
+    return output
 
 
 class LLMConnection:
@@ -353,36 +392,53 @@ class LLMConnection:
     def _read_stream(response):
         started, size, lines = time.monotonic(), 0, []
         completed = None
+
+        def consume_event():
+            if not lines:
+                return None
+            data = "\n".join(lines)
+            lines.clear()
+            if data == "[DONE]":
+                return None
+            try:
+                event = json.loads(data)
+            except (ValueError, TypeError):
+                raise LLMError("The provider returned an invalid stream event.") from None
+            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                raise LLMError("The provider returned an invalid stream event.")
+            kind = event["type"]
+            if kind in {"error", "response.failed", "response.incomplete"}:
+                detail = event.get("response")
+                error = (detail.get("error") if isinstance(detail, dict) else None) or event.get("error") or {}
+                raise LLMError(_stream_error(error.get("code", "") if isinstance(error, dict) else ""))
+            if kind == "response.completed":
+                candidate = event.get("response", {})
+                if not isinstance(candidate, dict) or candidate.get("status") != "completed":
+                    raise LLMError("The provider did not finish the analysis.")
+                return candidate
+            return None
+
         with response:
             while True:
                 line = response.readline(MAX_RESPONSE + 1)
                 if not line:
+                    # Some providers close after a complete terminal data frame
+                    # without its final blank separator. Parse that frame once;
+                    # partial deltas or [DONE] still cannot establish completion.
+                    completed = consume_event()
                     break
                 size += len(line)
                 if size > MAX_RESPONSE or time.monotonic() - started > STREAM_DEADLINE:
                     raise LLMError("The provider stream exceeded the size or time limit.")
                 decoded = line.decode("utf-8").rstrip("\r\n")
                 if decoded.startswith("data:"):
-                    lines.append(decoded[5:].lstrip())
+                    value = decoded[5:]
+                    lines.append(value[1:] if value.startswith(" ") else value)
                     continue
                 if decoded or not lines:
                     continue
-                data = "\n".join(lines)
-                lines = []
-                if data == "[DONE]":
-                    continue
-                event = json.loads(data)
-                if not isinstance(event, dict):
-                    raise LLMError("The provider returned an invalid stream event.")
-                kind = event.get("type")
-                if kind in {"error", "response.failed", "response.incomplete"}:
-                    detail = event.get("response")
-                    error = (detail.get("error") if isinstance(detail, dict) else None) or event.get("error") or {}
-                    raise LLMError(_stream_error(error.get("code", "") if isinstance(error, dict) else ""))
-                if kind == "response.completed":
-                    candidate = event.get("response", {})
-                    if not isinstance(candidate, dict) or candidate.get("status") != "completed":
-                        raise LLMError("The provider did not finish the analysis.")
+                candidate = consume_event()
+                if candidate is not None:
                     completed = candidate
                     # Terminal completion is sufficient; no partial deltas are trusted.
                     break
@@ -673,16 +729,7 @@ class LLMConnection:
             response = self._request(settings["base_url"] + "/responses", payload=payload, token=token, stream=True)
             if response.get("status") != "completed":
                 raise LLMError("The provider did not complete the analysis.")
-            chunks = []
-            for item in response.get("output", []):
-                for part in item.get("content", []) if isinstance(item, dict) else []:
-                    if not isinstance(part, dict):
-                        raise LLMError("The provider returned invalid report content.")
-                    if part.get("type") == "refusal":
-                        raise LLMError("The model declined to produce a lap report.")
-                    if part.get("type") == "output_text" and isinstance(part.get("text"), str):
-                        chunks.append(part["text"])
-            output = "".join(chunks)
+            output = _final_output_text(response)
         else:
             payload = {"model": settings["model"], "messages": [
                 {"role": "system", "content": instructions}, {"role": "user", "content": context}],

@@ -204,6 +204,15 @@ The four native MPC parameters are supported. Changes to acceleration limits als
 need the related profile limits confirmed so the proposed configuration remains
 consistent with the controller's constraints.
 
+Controller source is optional for telemetry discussion and required for code
+proposals. If a discussion started without it, use **Choose controller source**
+to open Analysis connection, select the checkout and Git reference, then save.
+Return to the lap and click **Attach selected source**. This pins the selected
+revision for future replies without changing earlier replies or requesting model
+inference. If a reply already failed, attachment leaves that error visible;
+click **Retry discussion turn** separately when ready. An existing source pin
+cannot be silently replaced.
+
 For a logic change, first confirm `deployed_source_commit` with the full commit
 hash shown in the engineer's question, after checking that it is the revision
 used for this lap. Code proposals include a reviewable, downloadable `.patch`

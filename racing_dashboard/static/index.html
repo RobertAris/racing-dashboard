@@ -133,7 +133,7 @@
         <article id="lap-report" class="lap-report" aria-live="polite"><div class="lap-report-empty"><span class="empty-icon" aria-hidden="true">↗</span><h3>A lap becomes a useful experiment.</h3><p>Each completed lap gets a performance summary and a report grounded in its recorded telemetry. Select a lap here to inspect the evidence.</p></div></article>
         <section id="lap-discussion" class="lap-discussion" aria-labelledby="discussion-title" hidden>
           <div class="discussion-heading"><div><span class="eyebrow">TURN EVIDENCE INTO AN EXPERIMENT</span><h3 id="discussion-title">Discuss this lap.</h3><p>Ask follow-up questions, confirm the car’s settings and review a concrete proposal.</p></div><span id="discussion-status" class="discussion-status" role="status">Ready</span></div>
-          <p id="discussion-provenance" class="discussion-provenance"></p>
+          <div class="discussion-source-note"><p id="discussion-provenance" class="discussion-provenance"></p><div class="discussion-source-actions"><button id="discussion-choose-source" type="button" class="small-button" hidden>Choose controller source ↗</button><button id="discussion-attach-source" type="button" class="small-button" hidden>Attach selected source</button></div></div>
           <div id="discussion-messages" class="discussion-messages" aria-live="polite"><p class="discussion-intro">Start with this lap’s evidence. Your engineer can ask for missing settings before recommending a change.</p></div>
           <div id="discussion-notice" class="discussion-notice" role="status" hidden></div>
           <button id="discussion-retry" type="button" class="small-button" hidden>Retry discussion turn</button>
