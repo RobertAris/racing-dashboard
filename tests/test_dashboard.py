@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -119,6 +120,25 @@ class ServerTests(unittest.TestCase):
             self.post("/api/command", {"action": "apply", "config": {"MAX_SPEED": 2}})
         self.assertIn("read-only", json.load(caught.exception)["error"])
         self.assertEqual(self.dashboard.state()["recording"]["frames"], 1)
+
+    def test_upstream_age_is_preserved_and_self_connection_rejected(self):
+        self.dashboard.ingest_live(frame(1), transport_age_s=1.5)
+        self.assertGreaterEqual(self.dashboard.state()["session"]["diagnostics"]["transport_age_s"], 1.5)
+        self.assertLess(time.monotonic() - self.dashboard.live_received, 2)
+        for age in (-1, float("nan"), 3):
+            with self.subTest(age=age), self.assertRaises(ValueError):
+                self.dashboard.ingest_live(frame(2), transport_age_s=age)
+        with self.assertRaisesRegex(ValueError, "own URL"):
+            self.dashboard.command({"action": "configure", "setup": {"telemetry_url": self.url}})
+
+    def test_telemetry_connection_is_saved_and_can_be_cleared(self):
+        self.dashboard.command({"action": "configure", "setup": {"telemetry_url": "http://127.0.0.1:1"}})
+        reloaded = Dashboard(data_dir=self.temp.name)
+        self.addCleanup(reloaded.close)
+        self.assertEqual(reloaded.setup["telemetry_url"], "http://127.0.0.1:1")
+        self.dashboard.command({"action": "configure", "setup": {"telemetry_url": ""}})
+        self.assertEqual(json.loads((Path(self.temp.name) / "telemetry_settings.json").read_text()),
+                         {"telemetry_url": ""})
 
     def test_preset_persistence_and_name_validation(self):
         self.post("/api/command", {"action": "preset_save", "name": "gentle", "config": {"MAX_SPEED": .8}})

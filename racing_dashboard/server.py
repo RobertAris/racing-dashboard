@@ -10,11 +10,13 @@ import json
 import math
 import mimetypes
 import multiprocessing as mp
+import os
 from pathlib import Path
 import queue
 import re
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +26,9 @@ from .analysis import AnalysisService
 from .maps import load_map
 from .recording import RunBuffer, import_csv, summarize, unpack_frame, validate_recording, validate_snapshot
 from .simulation import TUNABLES, run_worker, validate_changes, validate_options
+from .source_context import list_source_branches
+from .repository import resolve_repository_selection
+from .upstream import UpstreamTelemetry, validate_telemetry_url
 
 DEFAULT_CONFIG = {"MAX_SPEED": 6.0, "max_accel": 3.0, "profile_accel": 1.5, "profile_decel": 1.5}
 HISTORY_FIELDS = ("time_s", "speed_command", "actual_speed", "steering", "cross_track_error", "planning_ms", "cycle_ms")
@@ -115,12 +120,21 @@ def checkout_defaults(repo, track="levine", ref=""):
 
 class Dashboard:
     def __init__(self, setup=None, data_dir=None):
+        self.data_dir = Path(data_dir or Path.home() / ".local/share/robertaris-racing-dashboard").expanduser()
         self.setup = {"mode": "live", "repo": "", "track": "levine", "ref": "", "helper": "", "waypoints": "", "map_yaml": "",
-                      "case": "lap", "seed": 7, "noise": .01, "control_dt": .1, "config": {}, "rate": 1.0}
+                      "case": "lap", "seed": 7, "noise": .01, "control_dt": .1, "config": {}, "rate": 1.0,
+                      "telemetry_url": ""}
         self.setup.update(setup or {})
+        if not setup or setup.get("telemetry_url") is None:
+            try:
+                path = self.data_dir / "telemetry_settings.json"
+                if path.stat().st_size <= 8192:
+                    self.setup["telemetry_url"] = validate_telemetry_url(json.loads(path.read_text())["telemetry_url"])
+            except (OSError, ValueError, KeyError, TypeError):
+                self.setup["telemetry_url"] = ""
+        self.setup["telemetry_url"] = validate_telemetry_url(self.setup["telemetry_url"])
         _source_selection(self.setup["track"], self.setup["ref"])
         self.defaults = checkout_defaults(self.setup.get("repo"), self.setup["track"], self.setup["ref"])
-        self.data_dir = Path(data_dir or Path.home() / ".local/share/robertaris-racing-dashboard").expanduser()
         self.lock = threading.RLock()
         self.operations = threading.Lock()
         self.session = self.error = self.map_data = self.baseline = None
@@ -139,9 +153,46 @@ class Dashboard:
         self.replay_clock = 0.0
         self.replay_start_time = 0.0
         self.presets = self._read_presets()
-        self.analysis = AnalysisService(self.data_dir, active=self.setup["mode"] == "live")
+        self.analysis = AnalysisService(self.data_dir, active=self.setup["mode"] == "live",
+                                        chat_environment=self._chat_environment)
         if self.setup.get("map_yaml"):
             self._load_map(self.setup["map_yaml"])
+        self.upstream = UpstreamTelemetry(self)
+
+    def _save_telemetry_url(self, value):
+        self.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix=".telemetry-", dir=self.data_dir)
+        try:
+            with os.fdopen(descriptor, "w") as stream:
+                json.dump({"telemetry_url": value}, stream)
+            os.replace(name, self.data_dir / "telemetry_settings.json")
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+
+    def _chat_environment(self):
+        """Snapshot dashboard context without holding a lock during model work."""
+        with self.lock:
+            session = self.session or {}
+            return {
+                "mode": self.setup["mode"], "track": self.setup["track"],
+                "controller_repo": self.setup.get("repo", ""),
+                "controller_ref": self.setup.get("ref", ""),
+                "simulation_parameters": copy.deepcopy(session.get("config", {}))
+                    if self.setup["mode"] == "simulation" else {},
+                "telemetry": {key: copy.deepcopy(session[key]) for key in (
+                    "status", "time_s", "actual_speed", "speed_command", "steering",
+                    "pose", "metadata", "diagnostics") if key in session},
+                "current_run": {
+                    "summary": summarize(self.recording.frames),
+                    "dropped_frames": self.recording.dropped_frames,
+                    "samples": [{key: copy.deepcopy(frame[key]) for key in (
+                        "time_s", "pose", "actual_speed", "speed_command", "steering",
+                        "cross_track_error", "planning_ms", "progress_m") if key in frame}
+                        for frame in self.recording.frames[::max(1, math.ceil(len(self.recording.frames) / 120))]],
+                    "note": "A bounded sample of the current run, separate from saved full live laps.",
+                },
+            }
 
     def _read_presets(self):
         result = {}
@@ -271,12 +322,15 @@ class Dashboard:
         except queue.Full:
             raise ValueError("Simulation is busy; wait for the current update") from None
 
-    def ingest_live(self, frame):
+    def ingest_live(self, frame, *, transport_age_s=0.0):
         validate_snapshot(frame)
+        if (not isinstance(transport_age_s, (int, float)) or not math.isfinite(transport_age_s)
+                or not 0 <= transport_age_s <= 2):
+            raise ValueError("Live telemetry transport age must be between zero and two seconds")
         frame = copy.deepcopy(frame)
         frame["mode"] = "live"
         with self.lock:
-            self.last_live, self.live_received = frame, time.monotonic()
+            self.last_live, self.live_received = frame, time.monotonic() - transport_age_s
             active = self.setup["mode"] == "live"
         if active:
             self._accept_snapshot(frame)
@@ -325,8 +379,15 @@ class Dashboard:
                 _source_selection(updates.get("track", self.setup["track"]), updates.get("ref", self.setup["ref"]))
                 if "config" in updates:
                     updates["config"] = validate_changes(updates["config"])
+                if "telemetry_url" in updates:
+                    updates["telemetry_url"] = validate_telemetry_url(updates["telemetry_url"])
+                    target = urlsplit(updates["telemetry_url"])
+                    if (target.hostname in {"localhost", "127.0.0.1", "::1"}
+                            and target.port == getattr(self, "listen_port", None) and target.port is not None):
+                        raise ValueError("Choose the existing telemetry dashboard's port, not this dashboard's own URL")
                 mode_changed = updates.get("mode", self.setup["mode"]) != self.setup["mode"]
-                structural = {"repo", "track", "ref", "helper", "waypoints", "map_yaml", "case", "seed", "noise", "control_dt"}
+                telemetry_changed = updates.get("telemetry_url", self.setup["telemetry_url"]) != self.setup["telemetry_url"]
+                structural = {"repo", "track", "ref", "helper", "waypoints", "map_yaml", "case", "seed", "noise", "control_dt", "telemetry_url"}
                 source_changed = any(k in updates and updates[k] != self.setup[k] for k in structural)
                 if mode_changed or source_changed:
                     self._stop_worker()
@@ -336,7 +397,7 @@ class Dashboard:
                     self.error = None
                     if mode_changed or source_changed:
                         self.baseline = None
-                        if mode_changed:
+                        if mode_changed or telemetry_changed:
                             self._new_recording()
                         else:
                             self.trail.clear()
@@ -345,6 +406,8 @@ class Dashboard:
                         self.replay_playing = False
                         self.map_data = self.map_path = None
                         self.map_error = None
+                        if telemetry_changed:
+                            self.last_live = self.live_received = None
                         if self.setup["mode"] == "live" and self.last_live:
                             self._accept_snapshot(self.last_live)
                         if self.setup["mode"] == "replay" and self.replay:
@@ -353,6 +416,9 @@ class Dashboard:
                 if self.setup["mode"] != "replay":
                     self._load_map(self.setup.get("map_yaml"))
                 self.analysis.set_active(self.setup["mode"] == "live")
+                if "telemetry_url" in updates:
+                    self._save_telemetry_url(updates["telemetry_url"])
+                self.upstream.wake.set()
             elif action == "replay_load":
                 return self.load_replay(request.get("recording"))
             elif action in {"replay_seek", "replay_play", "replay_pause"}:
@@ -446,6 +512,7 @@ class Dashboard:
         # Provider authentication may involve network I/O. Never wait for it
         # while holding the telemetry lock.
         analysis_state = self.analysis.state()
+        telemetry_connection = self.upstream.state()
         with self.lock:
             if self.setup["mode"] == "replay" and self.replay_playing and self.replay:
                 target = self.replay_start_time + time.monotonic() - self.replay_clock
@@ -475,6 +542,7 @@ class Dashboard:
                 "presets": [{"name": name, "config": config} for name, config in sorted(self.presets.items())],
                 "baseline": self.baseline, "map": self.map_data,
                 "analysis": analysis_state,
+                "telemetry_connection": telemetry_connection,
                 "replay": {"index": self.replay_index, "total": len(self.replay["frames"]) if self.replay else 0,
                            "playing": self.replay_playing},
             }
@@ -487,6 +555,7 @@ class Dashboard:
 
     def close(self):
         self.closed = True
+        self.upstream.close()
         self.analysis.close()
         self._stop_worker()
 
@@ -545,6 +614,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.server.dashboard.analysis.connection.auth_callback(query)
                 self.server.dashboard.analysis.wake.set()
+                self.server.dashboard.analysis.discussion_wake.set()
+                self.server.dashboard.analysis.chat_wake.set()
                 self.send_response(303)
                 self.send_header("Location", "/")
                 self.send_header("Cache-Control", "no-store")
@@ -563,6 +634,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
+        elif path == "/api/chat":
+            try:
+                self.send_json(self.server.dashboard.analysis.chat_state())
+            except (ValueError, OSError) as exc:
+                self.send_json({"ok": False, "error": str(exc)}, 400)
         elif path == "/api/analysis/models":
             try:
                 self.send_json({"ok": True, "models": self.server.dashboard.analysis.connection.models()})
@@ -656,17 +732,32 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         parts = path.split("/")
         discussion_route = len(parts) >= 5 and parts[:3] == ["", "api", "laps"] and parts[4] == "discussion"
+        chat_route = path == "/api/chat" or path.startswith("/api/chat/")
         try:
             if self.headers.get_content_type() != "application/json":
                 raise ValueError("Send application/json")
             length = int(self.headers.get("Content-Length", "0"))
-            maximum = 32*1024 if discussion_route else 68*1024*1024
+            small_request = discussion_route or chat_route or path in {"/api/analysis/branches", "/api/analysis/provider"}
+            maximum = 32*1024 if small_request else 68*1024*1024
             if length <= 0 or length > maximum:
-                raise ValueError("Discussion request must be between 1 byte and 32 KiB" if discussion_route
+                raise ValueError("Chat request must be between 1 byte and 32 KiB" if chat_route else
+                                 "Discussion request must be between 1 byte and 32 KiB" if discussion_route else
+                                 "Repository request must be between 1 byte and 32 KiB" if small_request
                                  else "Request must be between 1 byte and 68 MiB")
             request = json.loads(self.rfile.read(length), parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"Invalid number: {value}")))
             dashboard = self.server.dashboard
-            if path == "/api/command":
+            if chat_route:
+                if path == "/api/chat":
+                    result = dashboard.analysis.send_chat(request)
+                elif path in {"/api/chat/retry", "/api/chat/reset"}:
+                    if not isinstance(request, dict) or request:
+                        raise ValueError("Retry and new chat require an empty JSON object")
+                    result = (dashboard.analysis.retry_chat() if path.endswith("/retry")
+                              else dashboard.analysis.reset_chat())
+                else:
+                    self.send_json({"ok": False, "error": "Unknown chat endpoint"}, 404)
+                    return
+            elif path == "/api/command":
                 result = dashboard.command(request)
             elif path == "/api/live":
                 result = dashboard.ingest_live(request)
@@ -674,6 +765,19 @@ class Handler(BaseHTTPRequestHandler):
                 result = dashboard.analysis.ingest(request)
             elif path == "/api/analysis/settings":
                 result = {"ok": True, **dashboard.analysis.configure(request)}
+            elif path == "/api/analysis/provider":
+                result = {"ok": True, **dashboard.analysis.configure_provider(request)}
+            elif path == "/api/analysis/branches":
+                if (not isinstance(request, dict) or "source_repo" not in request
+                        or set(request) - {"source_repo", "source_ref"}):
+                    raise ValueError("Choose a local repository to list its branches")
+                repo = request["source_repo"]
+                if not isinstance(repo, str) or not repo.strip() or len(repo) > 4096:
+                    raise ValueError("Enter the repository path on the dashboard server")
+                selection = resolve_repository_selection(repo.strip(), request.get("source_ref", ""))
+                result = {"ok": True, **list_source_branches(selection["repo"]),
+                          "resolved_repo": selection["repo"], "resolved_ref": selection["ref"],
+                          "resolved_from_url": selection["resolved_from_url"]}
             elif path == "/api/analysis/connect":
                 callback = f"http://127.0.0.1:{self.server.server_port}/auth/callback"
                 result = {"ok": True, **dashboard.analysis.connection.auth_start(callback)}
@@ -718,29 +822,36 @@ def make_server(dashboard, host="127.0.0.1", port=8765):
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
     server.dashboard = dashboard
+    dashboard.listen_port = server.server_port
     return server
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="RobertAris Lab 7 MPC — live lap engineering, simulation tuning, and replay")
-    parser.add_argument("--repo", default="", help="Lab 7 MPC checkout to load (read-only)")
+    parser = argparse.ArgumentParser(description="RobertAris Racing Lab — controller chat, live lap engineering, MPC simulation, and replay")
+    parser.add_argument("--repo", default="", help="Local controller repository for chat; simulation requires the supported MPC interface")
     parser.add_argument("--track", choices=("levine", "spielberg"), default="levine", help="Track launch defaults and waypoint selection")
     parser.add_argument("--ref", default="", help="Git branch, tag, or commit; blank uses the working tree")
     parser.add_argument("--helper", default="", help="Simulator helper providing build_env and rear_pose")
     parser.add_argument("--waypoints", default="", help="Full x,y,yaw,speed MPC route CSV override")
     parser.add_argument("--map", dest="map_yaml", default="", help="Saved ROS map YAML for display (and sim map selection)")
     parser.add_argument("--mode", choices=("live", "simulation", "replay"), default="live")
+    parser.add_argument("--telemetry-url", default=None, help="Read live telemetry and captured laps from an existing dashboard, such as http://127.0.0.1:8765; defaults to the saved connection")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", help="Local presets and lap history; defaults to ~/.local/share/robertaris-racing-dashboard")
     args = parser.parse_args(argv)
     try:
         _source_selection(args.track, args.ref)
+        if args.telemetry_url is not None:
+            args.telemetry_url = validate_telemetry_url(args.telemetry_url)
+        target = urlsplit(args.telemetry_url or "")
+        if target.hostname in {"localhost", "127.0.0.1", "::1"} and target.port == args.port:
+            parser.error("--telemetry-url must point to a different dashboard port")
     except ValueError as error:
         parser.error(str(error))
     if args.host not in {"127.0.0.1", "localhost"}:
         parser.error("Use a loopback host and SSH forwarding for remote access")
-    setup = {key: getattr(args, key) for key in ("repo", "track", "ref", "helper", "waypoints", "map_yaml", "mode")}
+    setup = {key: getattr(args, key) for key in ("repo", "track", "ref", "helper", "waypoints", "map_yaml", "mode", "telemetry_url")}
     dashboard = Dashboard(setup, args.data_dir)
     try:
         server = make_server(dashboard, args.host, args.port)

@@ -150,6 +150,18 @@ class DiscussionTests(unittest.TestCase):
         self.assertEqual(validate_unified_diff(patch(),PATH,SOURCE),SOURCE.replace('3.0','2.8'))
         self.assertEqual(supplied['source_context']['files'][0]['content'],SOURCE)
 
+    def test_working_tree_base_commit_does_not_authorize_a_pinned_code_patch(self):
+        supplied=confirm(context(),'deployed_source_commit',COMMIT)
+        supplied['source_context'].update(mode='working_tree',snapshot_sha256='b'*64)
+        with self.assertRaisesRegex(ValueError,'Use the main chat.*pinned Git revision'):
+            validate_discussion_response(code_turn(),supplied)
+        # The same confirmed commit still permits patches against an immutable
+        # Git revision, and working-tree telemetry discussion remains available.
+        supplied['source_context']['mode']='git_revision'
+        self.assertEqual(validate_discussion_response(code_turn(),supplied),code_turn())
+        supplied['source_context']['mode']='working_tree'
+        self.assertEqual(validate_discussion_response(turn(),supplied),turn())
+
     def test_measurement_fields_do_not_bypass_parameter_or_code_confirmation(self):
         for field in ('parameter','current_value','proposed_value','unit','source_file','source_commit','diff'):
             value=turn();value['proposals']=[proposal()];value['proposals'][0][field]='unconfirmed'

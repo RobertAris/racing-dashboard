@@ -13,6 +13,8 @@ let overrideConfig = {};
 let noticeTimer, mapImage, mapImageSource, mapReady = false, fitted = false, lastHistoryKey = '', localHistory = [], localTrail = [];
 let showMap = true, configEvents = [], previousConfig = null, previousTime = null;
 let analysisSettingsDirty = false, analysisBusy = false, lapListSignature = '', selectedLapId = null, selectedEvidenceId = null;
+let sourceBranchesRequest = 0;
+let telemetrySettingsDirty = false;
 let lapDetail = null, lapDetailKey = '', lapDetailRequest = null, lapReportSignature = '';
 const discussionDrafts = new Map();
 let discussionLapId = null, discussionMessagesKey = '', discussionFactsKey = '', discussionComparisonKey = '';
@@ -65,6 +67,7 @@ function fillSetup(setup) {
   const paths = {'repo-path':'repo','sim-ref':'ref','helper-path':'helper','waypoints-path':'waypoints','map-path':'map_yaml'};
   Object.entries(paths).forEach(([id,key]) => { if (setup[key] !== undefined) $(id).value = setup[key] || ''; });
   $('live-map-path').value = setup.map_yaml || '';
+  $('live-telemetry-url').value = setup.telemetry_url || '';
   if (setup.track) $('sim-track').value = setup.track;
   if (finite(setup.seed)) $('seed').value = setup.seed;
   if (finite(setup.rate)) $('sim-rate').value = setup.rate;
@@ -78,10 +81,10 @@ function displayMode(next) {
   $('live-setup').hidden = next !== 'live'; $('live-info').hidden = next !== 'live';
   $('lap-engineer').hidden = next !== 'live';
   $('replay-setup').hidden = next !== 'replay'; $('replay-controls').hidden = next !== 'replay';
-  $('map-mode-label').textContent = ({simulation:'SIMULATION',live:'LIVE CAR',replay:'RECORDED RUN'})[next] || next.toUpperCase();
+  $('map-mode-label').textContent = ({simulation:'MPC SIMULATION',live:'LIVE CAR',replay:'RECORDED RUN'})[next] || next.toUpperCase();
   $('page-title').textContent = ({simulation:'Find your line.',live:'Understand the drive.',replay:'Revisit the moment.'})[next];
-  $('page-description').textContent = ({simulation:'Run your Lab 7 MPC controller. Tune the response. Compare the run.',live:'Follow the car. Inspect each lap. Choose the next experiment.',replay:'Pause the run. Inspect the decisions. Keep the evidence.'})[next];
-  $('map-empty-copy').textContent = ({simulation:'Connect a Lab 7 checkout and select its track, then start a simulation.',live:'Connect the ROS bridge with your full Lab 7 route. Live telemetry and lap evidence will appear here.',replay:'Load a recording to inspect its route, commands and driven trace.'})[next];
+  $('page-description').textContent = ({simulation:'Test a compatible MPC controller. Tune the response. Compare the run.',live:'Follow the car. Inspect each lap. Choose the next experiment.',replay:'Pause the run. Inspect the decisions. Keep the evidence.'})[next];
+  $('map-empty-copy').textContent = ({simulation:'Connect a checkout with the supported MPC interface, select its track, then start a simulation.',live:'Connect the ROS bridge with your controller’s full route. Live telemetry and lap evidence will appear here.',replay:'Load a recording to inspect its route, commands and driven trace.'})[next];
   $('chart-window').textContent = next === 'replay' ? 'Recorded telemetry · 30 s window' : 'Recent 30 seconds';
 }
 function sessionStatus(session) {
@@ -93,6 +96,25 @@ function sessionStatus(session) {
   return mode === 'live' ? 'Receiving telemetry' : mode === 'replay' ? 'Replay paused' : 'Ready';
 }
 function isRunning(session) { return !!session && (session.running === true || String(session.status).toLowerCase() === 'running'); }
+function telemetryConnectionMessage(connection = {}, session = null) {
+  const url=connection.url;
+  if(!url)return session?.status==='disconnected' ? 'ROS bridge disconnected. Showing last received data.' : session ? `${String(session.status || 'receiving').replaceAll('_',' ')} · ${session.metadata?.source || 'ROS telemetry'}` : 'Waiting for the ROS bridge.';
+  if(connection.status==='error')return `Cannot receive from ${url}. ${connection.error || 'Check that the existing dashboard and SSH tunnel are running.'}`;
+  if(connection.status==='stale'||session?.status==='disconnected')return `Telemetry feed stale via ${url}. Showing last received data.${connection.error?` ${connection.error}`:''}`;
+  if(connection.status==='connected')return `Receiving via ${url}${finite(connection.imported_laps)?` · ${connection.imported_laps} saved lap${Number(connection.imported_laps)===1?'':'s'} imported`:''}`;
+  return `Connecting to ${url}…`;
+}
+function updateTelemetryConnection(connection, session, setup) {
+  connection=connection || {};
+  if(!telemetrySettingsDirty&&document.activeElement!==$('live-telemetry-url'))$('live-telemetry-url').value=setup.telemetry_url || connection.url || '';
+  $('live-connect-button').textContent=$('live-telemetry-url').value.trim()?'Connect telemetry feed':'Listen for live telemetry';
+  const message=telemetryConnectionMessage(connection,session),problem=['error','stale'].includes(connection.status)||session?.status==='disconnected';
+  $('live-message').textContent=message;
+  $('live-telemetry-dot').className=`dot${problem?' error':connection.url&&connection.status!=='connected'?' warning':''}`;
+  $('telemetry-connection-status').hidden=!connection.url;
+  $('telemetry-connection-status').textContent=connection.url?message:'';
+  $('telemetry-connection-status').classList.toggle('is-error',problem);
+}
 function hasData(session) { return session && (session.pose || session.route?.length || session.path?.length); }
 function point(p) { return Array.isArray(p) ? [Number(p[0]),Number(p[1])] : p && finite(p.x) && finite(p.y) ? [Number(p.x),Number(p.y)] : null; }
 function points(array) { if (!Array.isArray(array)) return []; return array.map(point).filter(p => p && p.every(Number.isFinite)); }
@@ -158,17 +180,18 @@ function update(state) {
   const diagnostics = session?.diagnostics;
   const firstChannelError=diagnostics?.errors && Object.entries(diagnostics.errors)[0];
   const channelReason=firstChannelError ? `${firstChannelError[0]}: ${typeof firstChannelError[1]==='string'?firstChannelError[1]:JSON.stringify(firstChannelError[1])}` : null;
-  const decision = typeof diagnostics === 'string' ? diagnostics : diagnostics?.stop_reason || channelReason || (diagnostics?.localization_jump ? `Localization jump detected${finite(diagnostics.localization_jump_m)?` · ${fmt(diagnostics.localization_jump_m,2)} m`:''}`:null) || diagnostics?.reason || diagnostics?.decision || diagnostics?.planner_debug?.reason || session?.reason || (diagnostics?.solver_status ? `MPC solver: ${diagnostics.solver_status}` : null);
+  const decision = typeof diagnostics === 'string' ? diagnostics : diagnostics?.stop_reason || channelReason || (diagnostics?.localization_jump ? `Localization jump detected${finite(diagnostics.localization_jump_m)?` · ${fmt(diagnostics.localization_jump_m,2)} m`:''}`:null) || diagnostics?.reason || diagnostics?.decision || diagnostics?.planner_debug?.reason || session?.reason || (diagnostics?.solver_status ? `Solver: ${diagnostics.solver_status}` : null);
   $('decision').textContent = decision || (session ? 'Decision diagnostics unavailable on this branch' : 'No telemetry yet');
   renderDiagnostics(diagnostics);
-  $('map-diagnostics').textContent = session ? (diagnostics?.note || 'Full route for lap timing · MPC reference and prediction show the local horizon.') : 'MPC reference, prediction and driven trace appear as telemetry arrives.';
+  $('map-diagnostics').textContent = session ? (diagnostics?.note || 'Full route for lap timing · controller reference and prediction show the local horizon.') : 'Controller reference, prediction and driven trace appear as telemetry arrives.';
   $('map-empty').hidden = !!hasData(session);
   $('command-source').textContent = session?.command_arc?.length ? '· derived from command' : '· unavailable';
   const metadata = session?.metadata || {};
-  const repo = metadata.repo || (mode==='simulation' ? setup.repo : '');
-  $('checkout-name').textContent = mode==='live' ? 'Live ROS · Lab 7 MPC' : metadata.branch || (repo ? repo.split('/').filter(Boolean).at(-1) : 'No checkout connected');
+  const repo = metadata.repo || (mode==='simulation' ? setup.repo : state.analysis?.connection?.source_repo || '');
+  const repoName=repositoryName(repo);
+  $('checkout-name').textContent = mode==='live' ? `Live ROS${repoName?` · ${repoName}`:' · controller telemetry'}` : [repoName,metadata.branch].filter(Boolean).join(' · ') || 'No checkout connected';
   $('checkout-name').title = repo || '';
-  $('revision').textContent = mode==='live' ? 'Deployed revision unverified' : [metadata.commit?.slice(0,10),metadata.dirty ? 'uncommitted changes' : '',mode === 'replay' ? metadata.recording_name : ''].filter(Boolean).join(' · ') || (repo ? 'Selected MPC source' : '—');
+  $('revision').textContent = mode==='live' ? 'Deployed revision unverified' : [metadata.commit?.slice(0,10),metadata.dirty ? 'uncommitted changes' : '',mode === 'replay' ? metadata.recording_name : ''].filter(Boolean).join(' · ') || (repo ? 'Selected controller source' : '—');
   const activeMismatch = session?.config && Object.entries(getConfig()).some(([key,value])=>Math.abs(value-Number(session.config[key]))>1e-7);
   const pending = dirty || activeMismatch;
   $('pending-indicator').hidden = !pending;
@@ -216,7 +239,7 @@ function update(state) {
   $('replay-duration').textContent = finite(session?.time_s) ? `${fmt(session.time_s,2)} s` : '—';
   $('replay-play').textContent = replay.playing ? 'Ⅱ Pause recording' : '▶ Play recording';
   $('replay-play').disabled = !replay.total; $('replay-step').disabled = !replay.total;
-  $('live-message').textContent = session?.status==='disconnected' ? 'ROS bridge disconnected. Showing last received data.' : session ? `${String(session.status || 'receiving').replaceAll('_',' ')} · ${metadata.source || 'ROS telemetry'}` : 'Waiting for the ROS bridge.';
+  updateTelemetryConnection(state.telemetry_connection,session,setup);
   $('frame-label').textContent = metadata.map_frame ? `${metadata.map_frame.toUpperCase()} FRAME` : 'WORLD FRAME';
   if (state.error || state.map_error) showError(state.error || state.map_error);
   if (state.map?.image && state.map.image !== mapImageSource) {
@@ -226,6 +249,7 @@ function update(state) {
   if (!fitted && hasData(session)) fitView();
   if (camera.follow && session?.pose) { camera.x=Number(session.pose[0]); camera.y=Number(session.pose[1]); }
   updateAnalysis(state.analysis || {});
+  renderChat();
   drawMap();
 }
 function renderSummary(prefix,summary) {
@@ -335,20 +359,63 @@ function providerFields() {
   $('analysis-url-field').hidden=provider!=='compatible';
   $('analysis-key-field').hidden=provider==='chatgpt';
   $('analysis-connect').hidden=provider!=='chatgpt';
-  $('analysis-provider-help').textContent=provider==='chatgpt' ? 'Connect your own ChatGPT account. Analysis uses that plan’s allowance. Other installations use their own connection.' : provider==='openai' ? 'Use your own OpenAI API key. Requests use API billing independently of a ChatGPT subscription.' : 'Use your own compatible server, including a local model endpoint. Model support and response time depend on that server.';
+  $('analysis-provider-help').textContent=provider==='chatgpt' ? 'Connect your own ChatGPT account. Chat uses that plan’s allowance. Settings are saved on this dashboard server.' : provider==='openai' ? 'Use your own OpenAI API key. Requests use API billing independently of a ChatGPT subscription.' : 'Use your own compatible server, including a local model endpoint. Model support and response time depend on that server.';
 }
 function analysisMessage(message,error=false) {
   $('analysis-settings-message').textContent=message || '';
   $('analysis-settings-message').hidden=!message;
   $('analysis-settings-message').classList.toggle('is-error',error);
 }
+function repositoryName(path) { return String(path || '').split(/[\\/]/).filter(Boolean).at(-1) || ''; }
+function sourceIdentity(connection = {}, source = {}) {
+  const configured=!!connection.source_repo;
+  const repo=connection.source_repo || latest.setup?.repo || '';
+  const repoName=configured ? connection.source_repo_name || repositoryName(repo) : repositoryName(repo) || source.repo_name || '';
+  const ref=configured ? connection.source_ref || '' : repo ? latest.setup?.ref || '' : source.ref || '';
+  const matchingSnapshot=source.status==='local_source'&&source.repo_name===repoName&&(source.ref || '')===ref;
+  const branch=matchingSnapshot?source.branch:configured?connection.source_branch:source.branch || connection.source_branch;
+  const commit=matchingSnapshot?source.commit:connection.source_commit;
+  const hasSource=!!repo || source.status==='local_source';
+  const revision=ref || (branch?`${branch} + local edits`:matchingSnapshot?'working files':'current branch + local edits');
+  return {repo,repoName,ref,branch,commit,hasSource,revision};
+}
+function clearSourceBranches() {
+  sourceBranchesRequest++;
+  $('analysis-source-branches').innerHTML='';
+  $('analysis-branches-button').disabled=false;
+  sourceFieldError('');
+  $('analysis-branch-status').textContent='Blank follows the checkout’s current branch with local edits. Choose a branch, tag or commit to read that revision.';
+}
+function sourceFieldError(message) {
+  $('analysis-source-error').textContent=message || '';
+  $('analysis-source-error').hidden=!message;
+  $('analysis-source-repo').setAttribute('aria-invalid',String(!!message));
+}
+async function loadSourceBranches() {
+  const repo=$('analysis-source-repo').value.trim(),ref=$('analysis-source-ref').value.trim(),requestId=++sourceBranchesRequest;
+  sourceFieldError('');
+  if(!repo){sourceFieldError('Enter a local repository path or a GitHub URL first.');return;}
+  $('analysis-branches-button').disabled=true;
+  $('analysis-branch-status').textContent='Finding the local checkout and reading its branches…';
+  try{
+    const result=await request('/api/analysis/branches',{source_repo:repo,source_ref:ref});
+    if(requestId!==sourceBranchesRequest||repo!==$('analysis-source-repo').value.trim()||ref!==$('analysis-source-ref').value.trim())return;
+    if(result.resolved_repo)$('analysis-source-repo').value=result.resolved_repo;
+    if(typeof result.resolved_ref==='string')$('analysis-source-ref').value=result.resolved_ref;
+    if(result.resolved_from_url)analysisSettingsDirty=true;
+    const branches=Array.isArray(result.branches)?result.branches.filter(branch=>typeof branch==='string'):[];
+    $('analysis-source-branches').innerHTML=branches.map(branch=>`<option value="${escapeHTML(branch)}"></option>`).join('');
+    const match=result.resolved_from_url?`Using local checkout: ${result.resolved_repo}. `:'';
+    $('analysis-branch-status').textContent=match+(result.is_git===false ? 'This folder has no Git branches. Leave the branch blank to use its current files.' : `${result.current_branch?`Current checkout: ${result.current_branch}. `:'Detached checkout. '}${branches.length} branch${branches.length===1?'':'es'} available${result.truncated?' (list limited)':''}. Choose a suggestion or type a tag or commit. Blank includes current local edits.`);
+  }catch(error){if(requestId===sourceBranchesRequest){sourceFieldError(error.message);$('analysis-branch-status').textContent='Check the repository above, then load its branches.';}}
+  finally{if(requestId===sourceBranchesRequest)$('analysis-branches-button').disabled=false;}
+}
 function updateAnalysis(analysis) {
-  if(mode!=='live')return;
   const connection=analysis.connection || {},provider=connection.provider==='openai-compatible'?'compatible':connection.provider || 'chatgpt';
   const connected=!!connection.connected;
-  $('analysis-connection-status').textContent=connected ? `${provider==='chatgpt'?'ChatGPT':provider==='openai'?'OpenAI API':'Compatible endpoint'} connected` : connection.error?'Connection needs attention':'Analysis connection needed';
+  $('analysis-connection-status').textContent=connected ? `${provider==='chatgpt'?'ChatGPT':provider==='openai'?'OpenAI API':'Compatible endpoint'} connected` : connection.error?'Connection needs attention':'Connect your model to chat';
   $('analysis-connection-status').classList.toggle('connected',connected);
-  $('analysis-settings-summary').textContent=[connection.model || 'gpt-6.1-sol',connection.reasoning_effort===''?'provider default':connection.reasoning_effort || 'high',analysis.enabled===false?'paused':''].filter(Boolean).join(' · ');
+  $('analysis-settings-summary').textContent=[connection.model || 'gpt-6.1-sol',connection.reasoning_effort===''?'provider default':connection.reasoning_effort || 'high',analysis.enabled===true?'lap reports on':''].filter(Boolean).join(' · ');
   if(!analysisSettingsDirty && !$('analysis-settings-form').contains(document.activeElement)){
     $('analysis-provider').value=provider;
     $('analysis-model').value=connection.model || 'gpt-6.1-sol';
@@ -367,7 +434,8 @@ function updateAnalysis(analysis) {
   $('analysis-connect').textContent=connected&&provider==='chatgpt'?'Reconnect ChatGPT':'Connect ChatGPT';
   $('analysis-connection-status').title=accountLabel || connection.error || '';
   const sourceStatus=connection.source_status;
-  $('analysis-source-status').textContent=sourceStatus==='local_source' ? `Local source context${connection.source_commit?` · ${connection.source_commit.slice(0,10)}`:''}. Deployed revision and effective parameters are unverified.` : sourceStatus&&sourceStatus!=='unavailable' ? (typeof sourceStatus==='string'?sourceStatus:sourceStatus.message || JSON.stringify(sourceStatus)) : 'Source context describes a local Git revision. The running car’s revision and effective parameters require separate verification.';
+  const selectedSource=sourceIdentity(connection,chatState.context?.source || {});
+  $('analysis-source-status').textContent=sourceStatus==='local_source' ? `Source: ${selectedSource.repoName || 'selected repository'} · ${selectedSource.revision}${selectedSource.commit?` (${selectedSource.commit.slice(0,10)})`:''}. Refreshed for every question; local source does not verify the car’s deployed revision.` : sourceStatus&&sourceStatus!=='unavailable' ? (typeof sourceStatus==='string'?sourceStatus:sourceStatus.message || JSON.stringify(sourceStatus)) : 'Choose any lab repository and branch on the dashboard server. Fresh source and saved laps are included automatically with each question.';
   if(connected)$('analysis-signin-link').hidden=true;
   const laps=Array.isArray(analysis.laps)?analysis.laps:[],ordered=[...laps];
   const current=analysis.current || latest.session?.lap || {};
@@ -418,7 +486,7 @@ function renderLapReport() {
   const signature=JSON.stringify([lapDetail,selectedEvidenceId]);if(signature===lapReportSignature)return;lapReportSignature=signature;
   const id=encodeURIComponent(selectedLapId),status=lapDetail.analysis_status || lap.analysis_status,error=lapDetail.error || lap.error;
   const metric=(label,value,unit='')=>`<div><span class="metric-label">${escapeHTML(label)}</span><strong>${finite(value)?`${fmt(value,2)}<small> ${escapeHTML(unit)}</small>`:'—'}</strong></div>`;
-  let html=`<div class="lap-report-heading"><div><span class="eyebrow">CAPTURED PERFORMANCE</span><h3>Lap ${escapeHTML(lap.lap_number ?? '—')} <span>${escapeHTML(analysisStatus(status))}</span></h3></div><div class="lap-report-downloads"><a class="small-button" href="/api/laps/${id}/export" download>↓ Evidence</a><a class="small-button" href="/api/laps/${id}/recording" download>↓ Replay</a></div></div>`;
+  let html=`<div class="lap-report-heading"><div><span class="eyebrow">CAPTURED PERFORMANCE</span><h3>Lap ${escapeHTML(lap.lap_number ?? '—')} <span>${escapeHTML(analysisStatus(status))}</span></h3></div><div class="lap-report-downloads"><button type="button" class="small-button" data-chat-lap="true">Ask about this lap ↗</button><a class="small-button" href="/api/laps/${id}/export" download>↓ Evidence</a><a class="small-button" href="/api/laps/${id}/recording" download>↓ Replay</a></div></div>`;
   html+='<div class="lap-report-metrics">'+metric('Lap time',metrics.lap_time_s ?? lap.lap_time_s,'s')+metric('Mean speed',metrics.actual_speed_mps?.mean ?? metrics.mean_speed_m_s ?? metrics.mean_speed ?? metrics.speed_mean_m_s,'m/s')+metric('Mean route deviation',metrics.cross_track_error_m?.mean ?? metrics.mean_error_m,'m')+metric('Largest sample gap',metrics.max_sample_gap_s,'s')+'</div>';
   if(metrics.baseline)html+=`<p class="lap-baseline-note">${finite(metrics.baseline.delta_time_s)?`${Number(metrics.baseline.delta_time_s)>0?'+':''}${fmt(metrics.baseline.delta_time_s,2)} s against the baseline lap.`:'Baseline comparison available.'} ${metrics.baseline.configuration_comparable===false?'Active configuration is unverified or differs; compare cautiously.':''}</p>`;
   const sourceContext=lapDetail.source_context || {};
@@ -485,6 +553,7 @@ function renderDiscussionMessages(messages) {
 }
 function updateDiscussion() {
   const available=selectedLapId && lapDetail && String(lapData().id)===String(selectedLapId);
+  $('legacy-discussion').hidden=!(available&&(lapDetail.discussion?.messages || []).length);
   $('lap-discussion').hidden=!available;if(!available)return;
   const data=discussionData(),draft=discussionDraft(),messages=Array.isArray(data.messages)?data.messages:[],facts=Array.isArray(data.confirmations)?data.confirmations:[];
   const status=data.status==='queued'&&!latest.analysis?.connection?.connected?'waiting_for_connection':data.status;
@@ -564,36 +633,231 @@ function highlightLapEvidence(id) {
   if(p.length){camera.follow=false;$('follow-button').setAttribute('aria-pressed','false');camera.x=p.reduce((sum,row)=>sum+row[0],0)/p.length;camera.y=p.reduce((sum,row)=>sum+row[1],0)/p.length;drawMap();notice('Evidence highlighted in amber on the track.');}
   else notice('This evidence has no recorded map segment. Its time interval is available in the replay.');
 }
-async function saveAnalysisSettings() {
+function readProviderSettings() {
   const provider=$('analysis-provider').value;
-  const settings={provider,model:$('analysis-model').value.trim(),reasoning_effort:$('analysis-effort').value,base_url:provider==='compatible'?$('analysis-base-url').value.trim():'https://api.openai.com/v1',source_repo:$('analysis-source-repo').value.trim(),source_ref:$('analysis-source-ref').value.trim(),enabled:$('analysis-enabled').checked};
+  const settings={provider,model:$('analysis-model').value.trim(),reasoning_effort:$('analysis-effort').value,base_url:provider==='compatible'?$('analysis-base-url').value.trim():'https://api.openai.com/v1'};
   const key=$('analysis-api-key').value.trim();if(key)settings.api_key=key;
-  $('analysis-api-key').value='';
   if(!settings.model)throw new Error('Enter a model name.');
-  const result=await request('/api/analysis/settings',settings);analysisSettingsDirty=false;return result;
+  return settings;
+}
+function clearSavedProviderKey(settings) {
+  if(settings.api_key&&$('analysis-api-key').value.trim()===settings.api_key)$('analysis-api-key').value='';
+}
+async function saveProviderSettings() {
+  const settings=readProviderSettings();
+  const result=await request('/api/analysis/provider',settings);
+  clearSavedProviderKey(settings);
+  // Provider setup must not discard or validate a repository draft.
+  return result;
+}
+async function saveAnalysisSettings() {
+  const settings={...readProviderSettings(),source_repo:$('analysis-source-repo').value.trim(),source_ref:$('analysis-source-ref').value.trim(),enabled:$('analysis-enabled').checked};
+  sourceFieldError('');
+  let result;
+  try{result=await request('/api/analysis/settings',settings);}
+  catch(error){
+    if(/repository|checkout|source|git|revision|branch/i.test(error.message)){sourceFieldError(error.message);error.sourceField=true;}
+    throw error;
+  }
+  clearSavedProviderKey(settings);
+  const connection=result.connection;
+  if(connection&&$('analysis-source-repo').value.trim()===settings.source_repo&&$('analysis-source-ref').value.trim()===settings.source_ref){
+    $('analysis-source-repo').value=connection.source_repo || '';
+    $('analysis-source-ref').value=connection.source_ref || '';
+  }
+  analysisSettingsDirty=false;return result;
 }
 async function analysisAction(action) {
   if(analysisBusy)return;analysisBusy=true;
   $('analysis-settings-form').classList.add('busy');analysisMessage('');
   try {
-    if(action==='save'){await saveAnalysisSettings();analysisMessage('Settings saved. Completed laps follow this analysis preference.');}
+    if(action==='save'){await saveAnalysisSettings();analysisMessage('Settings saved. Your next chat message will use the selected source and model.');}
     if(action==='connect'){
-      await saveAnalysisSettings();const result=await request('/api/analysis/connect',{});
+      await saveProviderSettings();const result=await request('/api/analysis/connect',{});
       const url=new URL(result.url);if(url.protocol!=='https:')throw new Error('The sign-in service returned an invalid URL.');
       $('analysis-signin-link').href=url.href;$('analysis-signin-link').hidden=false;
       analysisMessage('Open the sign-in link below and authorize your own ChatGPT account. Return here when it finishes.');
     }
     if(action==='disconnect'){await request('/api/analysis/disconnect',{});$('analysis-signin-link').hidden=true;analysisMessage('Analysis connection disconnected. Captured lap evidence remains available.');}
     if(action==='models'){
-      if(analysisSettingsDirty)throw new Error('Save the provider settings before listing its models.');
+      await saveProviderSettings();
       const result=await request('/api/analysis/models'),models=Array.isArray(result)?result:result.models || result.data || [];
       $('analysis-models').innerHTML=models.map(model=>`<option value="${escapeHTML(typeof model==='string'?model:model.id)}">${escapeHTML(model.display_name || model.name || '')}</option>`).join('');
       analysisMessage(`${models.length} model${models.length===1?'':'s'} listed. Choose a model in the model field. A listing does not guarantee access for inference.`);
     }
     await poll();
-  }catch(error){analysisMessage(error.message,true);}
+  }catch(error){analysisMessage(error.sourceField?'Check the repository or branch above. Your provider can still be connected separately.':error.message,true);}
   finally{analysisBusy=false;$('analysis-settings-form').classList.remove('busy');}
 }
+
+/* One conversation, with fresh lap/source context supplied by the server. */
+let chatState = {messages:[],status:'idle',revision:-1,context:{}}, chatLoaded = false;
+let chatSending = false, chatPolling = false, chatPollError = '', chatLocalError = '';
+let chatMessagesKey = '', chatPendingRequest = null, chatFocusLapId = null, chatFocusInitialized = false;
+const chatWelcome = $('chat-messages').innerHTML;
+
+function chatInline(value) {
+  // Escape before adding a small, fixed set of markup. Model HTML never runs.
+  return String(value).split(/(`[^`\n]+`)/g).map(part=>{
+    if(part.startsWith('`')&&part.endsWith('`'))return `<code>${escapeHTML(part.slice(1,-1))}</code>`;
+    return escapeHTML(part).replace(/\*\*([^*\n]+)\*\*/g,'<strong>$1</strong>').replace(/\*([^*\n]+)\*/g,'<em>$1</em>');
+  }).join('');
+}
+function chatMarkdown(value) {
+  const lines=String(value || '').replace(/\r\n?/g,'\n').split('\n'),out=[];
+  const tableCells=line=>line.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(cell=>cell.trim());
+  const tableRule=line=>/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line || '');
+  const beginsBlock=line=>/^\s*(```|~~~|#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s?|[-*_]{3,}\s*$)/.test(line || '');
+  for(let i=0;i<lines.length;){
+    const line=lines[i];
+    if(!line.trim()){i++;continue;}
+    const fence=line.match(/^\s*(`{3,}|~{3,})([^\s]*)\s*$/);
+    if(fence){
+      const marker=fence[1][0],width=fence[1].length,body=[];i++;
+      while(i<lines.length&&!new RegExp(`^\\s*${marker}{${width},}\\s*$`).test(lines[i]))body.push(lines[i++]);
+      if(i<lines.length)i++;
+      out.push(`<div class="chat-code"><div class="chat-code-heading"><span>${escapeHTML(fence[2] || 'code')}</span><button type="button" class="small-button" data-chat-copy="true">Copy code</button></div><pre><code>${escapeHTML(body.join('\n'))}</code></pre></div>`);continue;
+    }
+    const heading=line.match(/^\s*(#{1,6})\s+(.+)$/);
+    if(heading){const level=Math.min(6,heading[1].length+2);out.push(`<h${level}>${chatInline(heading[2])}</h${level}>`);i++;continue;}
+    if(/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)){out.push('<hr>');i++;continue;}
+    if(line.includes('|')&&tableRule(lines[i+1])){
+      const headers=tableCells(line),rows=[];i+=2;
+      while(i<lines.length&&lines[i].trim()&&lines[i].includes('|')){rows.push(tableCells(lines[i++]));}
+      out.push(`<div class="chat-table"><table><thead><tr>${headers.map(cell=>`<th>${chatInline(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${headers.map((_,index)=>`<td>${chatInline(row[index] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);continue;
+    }
+    if(/^\s*[-*+]\s/.test(line)||/^\s*\d+[.)]\s/.test(line)){
+      const ordered=/^\s*\d+[.)]\s/.test(line),items=[],pattern=ordered?/^\s*\d+[.)]\s+/:/^\s*[-*+]\s+/;
+      while(i<lines.length&&pattern.test(lines[i]))items.push(chatInline(lines[i++].replace(pattern,'')));
+      const tag=ordered?'ol':'ul';out.push(`<${tag}>${items.map(item=>`<li>${item}</li>`).join('')}</${tag}>`);continue;
+    }
+    if(/^\s*>/.test(line)){
+      const body=[];while(i<lines.length&&/^\s*>/.test(lines[i]))body.push(chatInline(lines[i++].replace(/^\s*>\s?/,'')));
+      out.push(`<blockquote>${body.join('<br>')}</blockquote>`);continue;
+    }
+    const body=[chatInline(line)];i++;
+    while(i<lines.length&&lines[i].trim()&&!beginsBlock(lines[i])&&!(lines[i].includes('|')&&tableRule(lines[i+1])))body.push(chatInline(lines[i++]));
+    out.push(`<p>${body.join('<br>')}</p>`);
+  }
+  return out.join('');
+}
+function chatBusy() { return chatSending || ['queued','analyzing','waiting_for_connection'].includes(chatState.status); }
+function setChatState(value) {
+  const next=value?.chat || value;
+  if(!next || !Array.isArray(next.messages))return;
+  // A poll begun before a mutation can return afterwards. Revisions only advance.
+  if(chatLoaded&&Number.isFinite(next.revision)&&Number(next.revision)<Number(chatState.revision))return;
+  if(!chatFocusInitialized){
+    const lastUser=[...next.messages].reverse().find(message=>message.role==='user');
+    chatFocusLapId=lastUser&&Object.hasOwn(lastUser,'lap_id')?lastUser.lap_id || null:next.context?.selected_lap_id || null;
+    chatFocusInitialized=true;
+  }
+  chatState=next;chatLoaded=true;chatPollError='';renderChat();
+}
+function renderChat() {
+  const connection=latest.analysis?.connection || {},context=chatState.context || {},source=context.source || {};
+  const messages=Array.isArray(chatState.messages)?chatState.messages:[],busy=chatBusy();
+  const key=JSON.stringify(messages);
+  if(key!==chatMessagesKey){
+    const timeline=$('chat-messages'),nearBottom=timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight<90,position=timeline.scrollTop;
+    timeline.innerHTML=messages.length?messages.map(message=>{
+      const assistant=message.role==='assistant';
+      return `<article class="chat-message ${assistant?'chat-from-engineer':'chat-from-user'}"><div class="chat-message-role">${assistant?'<span class="chat-role-mark" aria-hidden="true">↗</span>Racing engineer':'You'}</div><div class="chat-message-body">${assistant?chatMarkdown(message.content):`<p class="chat-user-text">${escapeHTML(message.content)}</p>`}</div></article>`;
+    }).join(''):chatWelcome;
+    if(nearBottom)timeline.scrollTop=timeline.scrollHeight;else timeline.scrollTop=position;
+    chatMessagesKey=key;
+  }
+  $('chat-model').textContent=connection.model || '';
+  const lapCount=context.lap_count ?? latest.analysis?.laps?.length ?? 0;
+  $('chat-laps-context').textContent=`${lapCount} saved lap${Number(lapCount)===1?'':'s'} · automatic context`;
+  const selection=sourceIdentity(connection,source);
+  $('chat-source-context').textContent=selection.hasSource?`${selection.repoName || 'Selected repository'} · ${selection.revision}`:'Choose a repository and branch in Settings';
+  const sourceFiles=source.file_count;
+  $('chat-source-context').title=selection.hasSource?`${selection.repo?`${selection.repo}\n`:''}${finite(sourceFiles)?`${sourceFiles} files included in the last question. `:''}Source is refreshed for each question.${source.omitted_file_count?` ${source.omitted_file_count} files available for retrieval.`:''}`:'Choose any lab repository on the dashboard server, then its branch or revision.';
+  const status=chatState.status;
+  $('chat-pending').hidden=!busy;
+  $('chat-pending-text').textContent=chatSending?'Sending your message…':status==='queued'||status==='waiting_for_connection'?connection.connected?'Your message is saved. Preparing a reply…':'Your message is saved. Connect your model in Settings to receive a reply.':'Reviewing your laps and source…';
+  const error=chatLocalError || chatState.error || chatPollError;
+  $('chat-error').hidden=!error;$('chat-error-text').textContent=error || '';
+  $('chat-retry').hidden=status!=='failed';$('chat-retry').disabled=busy;
+  $('chat-send').disabled=busy||status==='failed'||!$('chat-message').value.trim();
+  $('chat-send').innerHTML=chatSending?'Sending…':'Send <span aria-hidden="true">↑</span>';
+  $('chat-new').disabled=busy||!messages.length;
+  $('chat-messages').setAttribute('aria-busy',String(busy));
+  $('chat-focus').hidden=!chatFocusLapId;
+  if(chatFocusLapId){
+    const lap=latest.analysis?.laps?.find(item=>String(item.id)===chatFocusLapId);
+    $('chat-focus-label').textContent=`Focus: ${lap?`Lap ${lap.lap_number}${finite(lap.lap_time_s)?` · ${fmt(lap.lap_time_s,2)} s`:''}`:'selected saved lap'} · other laps remain available`;
+  }
+  const omitted=context.history_omitted_messages ?? chatState.history_omitted_messages ?? 0;
+  if(status==='failed')$('chat-compose-help').textContent='Retry the failed reply or start a new chat to continue. Your draft is saved.';
+  else if(omitted)$('chat-compose-help').textContent=`Enter to send · Shift + Enter for a new line · ${omitted} older messages outside model context`;
+  else $('chat-compose-help').textContent='Enter to send · Shift + Enter for a new line';
+}
+async function pollChat() {
+  if(chatPolling)return;chatPolling=true;
+  try{setChatState(await request('/api/chat'));}
+  catch(error){chatPollError=`Chat could not refresh. ${error.message}`;renderChat();}
+  finally{chatPolling=false;}
+}
+async function chatPollLoop() { await pollChat();setTimeout(chatPollLoop,chatBusy()?1000:3000); }
+function resizeChatCompose() {
+  const input=$('chat-message');input.style.height='auto';input.style.height=`${Math.min(200,Math.max(58,input.scrollHeight))}px`;
+}
+function focusChatLap(id) {
+  if(!id)return;
+  chatFocusLapId=String(id);renderChat();$('engineer-chat').scrollIntoView({block:'start',behavior:'smooth'});$('chat-message').focus({preventScroll:true});
+}
+function openChatSettings() {
+  $('analysis-settings').open=true;$('analysis-settings').scrollIntoView({block:'center',behavior:'smooth'});
+}
+async function submitChat() {
+  const message=$('chat-message').value.trim();if(!message||chatBusy()||chatState.status==='failed')return;
+  // Send null explicitly so removing the focus also clears the server's saved selection.
+  const values={message,lap_id:chatFocusLapId || null};
+  const signature=JSON.stringify(values);
+  if(!chatPendingRequest||chatPendingRequest.signature!==signature)chatPendingRequest={signature,values:{...values,idempotency_key:discussionRequestId()}};
+  const pending=chatPendingRequest;chatSending=true;chatLocalError='';renderChat();
+  try{
+    const result=await request('/api/chat',pending.values);setChatState(result);chatPendingRequest=null;
+    if($('chat-message').value.trim()===message){$('chat-message').value='';saveChatDraft();resizeChatCompose();}
+    $('chat-messages').scrollTop=$('chat-messages').scrollHeight;
+  }catch(error){chatLocalError=`${error.message} Your message is still here; sending it again safely retries the same request.`;}
+  finally{chatSending=false;renderChat();}
+}
+function saveChatDraft() {
+  try{sessionStorage.setItem('racing-engineer-draft',$('chat-message').value);}catch(_){}
+}
+$('chat-compose').addEventListener('submit',event=>{event.preventDefault();submitChat();});
+$('chat-message').addEventListener('input',()=>{resizeChatCompose();saveChatDraft();renderChat();});
+$('chat-message').addEventListener('keydown',event=>{
+  if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();submitChat();}
+});
+$('chat-settings-button').addEventListener('click',openChatSettings);
+$('chat-clear-focus').addEventListener('click',()=>{chatFocusLapId=null;renderChat();});
+$('chat-messages').addEventListener('click',async event=>{
+  const starter=event.target.closest('[data-chat-starter]');
+  if(starter){$('chat-message').value=starter.dataset.chatStarter;saveChatDraft();resizeChatCompose();renderChat();$('chat-message').focus();return;}
+  const button=event.target.closest('[data-chat-copy]');
+  if(button){
+    const code=button.closest('.chat-code')?.querySelector('pre code');if(!code)return;
+    try{await navigator.clipboard.writeText(code.textContent);button.textContent='Copied';setTimeout(()=>{if(button.isConnected)button.textContent='Copy code';},1800);}
+    catch(_){const range=document.createRange();range.selectNodeContents(code);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);button.textContent='Select & copy';}
+  }
+});
+$('chat-retry').addEventListener('click',async()=>{
+  if(chatBusy())return;chatSending=true;chatLocalError='';renderChat();
+  try{setChatState(await request('/api/chat/retry',{}));}catch(error){chatLocalError=error.message;}
+  finally{chatSending=false;renderChat();}
+});
+$('chat-new').addEventListener('click',async()=>{
+  if(chatBusy())return;chatSending=true;chatLocalError='';renderChat();
+  try{setChatState(await request('/api/chat/reset',{}));chatFocusLapId=null;chatPendingRequest=null;}
+  catch(error){chatLocalError=error.message;}
+  finally{chatSending=false;renderChat();$('chat-message').focus();}
+});
+try{$('chat-message').value=sessionStorage.getItem('racing-engineer-draft') || '';}catch(_){}
+resizeChatCompose();
 
 function drawChart(id,history,series,options={}) {
   const {ctx,width,height}=setupCanvas($(id));
@@ -623,7 +887,12 @@ all('[data-advanced]').forEach(el=>el.addEventListener('input',()=>{overrideConf
 all('[data-mode]').forEach(button=>button.addEventListener('click',async()=>{if(button.dataset.mode===mode)return; const next=button.dataset.mode; const result=await command('configure',{setup:{mode:next}});if(result){displayMode(next);fitted=false;localHistory=[];localTrail=[];$('connection-settings').open=true;}}));
 $('connect-button').addEventListener('click',async()=>{const result=await command('configure',{setup:readSetup()},'Checkout connected. Start a simulation when ready.');if(result){dirty=false;$('pending-indicator').hidden=true;$('connection-settings').open=false;fitted=false;}});
 $('empty-connect').addEventListener('click',()=>{$('connection-settings').open=true;(mode==='simulation'?$('repo-path'):mode==='replay'?$('recording-file'):$('live-connect-button')).focus();});
-$('live-connect-button').addEventListener('click',()=>command('configure',{setup:{mode:'live',map_yaml:$('live-map-path').value.trim()}},'Listening for live telemetry. Start the ROS bridge in your ROS environment.'));
+$('live-telemetry-url').addEventListener('input',()=>{telemetrySettingsDirty=true;$('live-connect-button').textContent=$('live-telemetry-url').value.trim()?'Connect telemetry feed':'Listen for live telemetry';});
+$('live-connect-button').addEventListener('click',async()=>{
+  const telemetry_url=$('live-telemetry-url').value.trim();
+  const result=await command('configure',{setup:{mode:'live',map_yaml:$('live-map-path').value.trim(),telemetry_url}},telemetry_url?'Connecting to the existing dashboard feed.':'Listening for live telemetry. Start the ROS bridge in your ROS environment.');
+  if(result){telemetrySettingsDirty=false;updateTelemetryConnection(latest.telemetry_connection,latest.session,latest.setup || {});}
+});
 async function applyConfig(restart=false){
   const config=getConfig();
   if(Object.values(config).some(value=>typeof value==='number'&&!Number.isFinite(value))){showError('Enter a valid number for each planner parameter.');return;}
@@ -672,11 +941,15 @@ $('analysis-settings-form').addEventListener('submit',event=>{event.preventDefau
 $('analysis-connect').addEventListener('click',()=>analysisAction('connect'));
 $('analysis-disconnect').addEventListener('click',()=>analysisAction('disconnect'));
 $('analysis-models-button').addEventListener('click',()=>analysisAction('models'));
+$('analysis-branches-button').addEventListener('click',loadSourceBranches);
+$('analysis-source-repo').addEventListener('input',clearSourceBranches);
+$('analysis-source-ref').addEventListener('input',()=>sourceFieldError(''));
 $('lap-list').addEventListener('click',event=>{
   const button=event.target.closest('[data-lap-id]');if(!button)return;
   selectedLapId=button.dataset.lapId;selectedEvidenceId=null;lapDetail=null;lapDetailKey='';lapListSignature='';updateAnalysis(latest.analysis || {});
 });
 $('lap-report').addEventListener('click',async event=>{
+  if(event.target.closest('[data-chat-lap]'))focusChatLap(selectedLapId);
   const evidenceButton=event.target.closest('[data-evidence-id]');
   if(evidenceButton)highlightLapEvidence(evidenceButton.dataset.evidenceId);
   if(event.target.closest('[data-clear-evidence]')){selectedEvidenceId=null;renderLapReport();drawMap();}
@@ -741,3 +1014,4 @@ $('discussion-attach-source').addEventListener('click',async()=>{
   finally{draft.posting=false;draft.postingAction=null;if(selectedLapId===identifier)updateDiscussion();}
 });
 pollLoop();
+chatPollLoop();

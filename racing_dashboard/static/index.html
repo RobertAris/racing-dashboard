@@ -12,7 +12,7 @@
   <header class="topbar">
     <a class="brand" href="/" aria-label="RobertAris Racing Lab home"><span class="brand-icon" aria-hidden="true">R<span>↗</span></span><span><b>RobertAris</b><span class="brand-sub">RACING LAB <i>/</i> 07</span></span></a>
     <nav class="mode-switch" aria-label="Dashboard mode">
-      <button class="mode" data-mode="simulation" aria-pressed="false">Simulation</button>
+      <button class="mode" data-mode="simulation" aria-pressed="false">MPC simulation</button>
       <button class="mode active" data-mode="live" aria-pressed="true">Live car</button>
       <button class="mode" data-mode="replay" aria-pressed="false">Replay</button>
     </nav>
@@ -21,12 +21,52 @@
 
   <main>
     <section class="intro">
-      <div><p class="eyebrow">MPC WORKBENCH</p><h1 id="page-title">Understand the drive.</h1><p id="page-description">Follow the car. Inspect each lap. Choose the next experiment.</p></div>
+      <div><p class="eyebrow">RACING WORKBENCH</p><h1 id="page-title">Understand the drive.</h1><p id="page-description">Follow the car. Inspect each lap. Choose the next experiment.</p></div>
       <div class="run-identity"><span id="checkout-name">No checkout connected</span><code id="revision">—</code></div>
     </section>
 
     <div id="notice" class="notice" role="status" hidden></div>
     <div id="error" class="error" role="alert" hidden></div>
+
+    <section id="engineer-chat" class="engineer-chat" aria-labelledby="chat-title">
+      <div class="section-heading chat-section-heading"><div><p class="eyebrow">YOUR RACING ENGINEER</p><h2 id="chat-title">Ask about the drive.</h2><p class="section-description">Your laps and local controller code, in one conversation.</p></div><span id="analysis-connection-status" class="engineer-connection">Connect your model to chat</span></div>
+      <div class="chat-card card">
+        <div class="chat-toolbar"><span class="chat-identity"><span class="dot" aria-hidden="true"></span>Racing engineer <small id="chat-model"></small></span><div class="chat-toolbar-actions"><button id="chat-settings-button" type="button" class="small-button">Settings</button><button id="chat-new" type="button" class="small-button">New chat</button></div></div>
+        <div id="chat-context" class="chat-context"><span id="chat-laps-context">Saved laps included automatically</span><span id="chat-source-context">Choose a repository and branch in Settings</span></div>
+        <div id="chat-messages" class="chat-messages" role="log" aria-label="Conversation with racing engineer" aria-live="polite" aria-relevant="additions text">
+          <div class="chat-welcome"><span class="chat-welcome-icon" aria-hidden="true">↗</span><h3>What would you like to improve?</h3><p>Ask a question, compare laps, or work through a code change. I’ll use the recorded evidence and your selected controller source.</p><div class="chat-starters"><button type="button" data-chat-starter="Compare my latest lap with the best comparable lap. Where am I losing time?">Where am I losing time? <span>↗</span></button><button type="button" data-chat-starter="Review my controller source and lap evidence. Suggest one concrete parameter change, with the current value, proposed value, units and how to test it.">Suggest a parameter change <span>↗</span></button><button type="button" data-chat-starter="Review my local controller source for a useful code improvement. Show the file, explain the change and provide a concrete code example or diff.">Review my controller code <span>↗</span></button></div></div>
+        </div>
+        <div id="chat-pending" class="chat-pending" role="status" hidden><span class="chat-thinking" aria-hidden="true"><i></i><i></i><i></i></span><span id="chat-pending-text">Reviewing your laps and source…</span></div>
+        <div id="chat-error" class="chat-error" role="alert" hidden><span id="chat-error-text"></span><button id="chat-retry" type="button" class="small-button" hidden>Retry reply</button></div>
+        <form id="chat-compose" class="chat-compose">
+          <div id="chat-focus" class="chat-focus" hidden><span id="chat-focus-label"></span><button id="chat-clear-focus" type="button" aria-label="Remove lap focus">×</button></div>
+          <label for="chat-message" class="visually-hidden">Message your racing engineer</label>
+          <textarea id="chat-message" rows="2" maxlength="12000" placeholder="Ask anything about your laps or controller…" aria-describedby="chat-compose-help"></textarea>
+          <div class="chat-compose-footer"><p id="chat-compose-help">Enter to send · Shift + Enter for a new line</p><button id="chat-send" type="submit" class="button primary" disabled>Send <span aria-hidden="true">↑</span></button></div>
+        </form>
+        <p class="chat-footnote">Each question shares lap evidence and selected source with your connected provider. Recommendations stay in chat for you to review and test.</p>
+      </div>
+      <details id="analysis-settings" class="analysis-settings card">
+        <summary><span class="heading-label"><span class="control-symbol" aria-hidden="true">☷</span><span>Chat settings & repository</span></span><span id="analysis-settings-summary">GPT-6.1 Sol · high</span><span aria-hidden="true">⌄</span></summary>
+        <form id="analysis-settings-form" class="analysis-settings-body">
+          <div class="analysis-fields">
+            <label>Provider<select id="analysis-provider"><option value="chatgpt">ChatGPT plan</option><option value="openai">OpenAI API</option><option value="compatible">OpenAI-compatible endpoint</option></select></label>
+            <label>Model<input id="analysis-model" type="text" list="analysis-models" value="gpt-6.1-sol" spellcheck="false" autocomplete="off" required><datalist id="analysis-models"></datalist></label>
+            <label>Reasoning effort<select id="analysis-effort"><option value="">Provider default</option><option value="none">None</option><option value="low">Low</option><option value="medium">Medium</option><option value="high" selected>High</option><option value="xhigh">Extra high</option></select></label>
+            <label id="analysis-url-field" hidden>Base URL<input id="analysis-base-url" type="text" placeholder="http://127.0.0.1:11434/v1" spellcheck="false" autocomplete="off"></label>
+            <label id="analysis-key-field" hidden>API key<input id="analysis-api-key" type="password" placeholder="Enter your own key" autocomplete="off"><span class="field-help">Leave blank to keep the saved credential.</span></label>
+            <label class="analysis-source-field">Repository path or GitHub URL<input id="analysis-source-repo" type="text" placeholder="/path/to/your/lab-repository or https://github.com/owner/repo" spellcheck="false" autocomplete="off" aria-describedby="analysis-source-help analysis-source-error"><span id="analysis-source-help" class="field-help">A GitHub link uses a matching local checkout, including your local edits. Repositories are not downloaded automatically.</span><span id="analysis-source-error" class="field-help source-field-error" role="status" hidden></span></label>
+            <label class="analysis-reference-field">Branch or revision <span class="optional-label">optional</span><span class="source-reference-row"><input id="analysis-source-ref" type="text" list="analysis-source-branches" placeholder="Current branch and local edits (leave blank)" spellcheck="false" autocomplete="off"><button id="analysis-branches-button" type="button" class="small-button">Load branches</button></span><datalist id="analysis-source-branches"></datalist><span id="analysis-branch-status" class="field-help" role="status">Blank follows the checkout’s current branch with local edits. Choose a branch, tag or commit to read that revision.</span></label>
+          </div>
+          <div class="analysis-settings-footer"><label class="analysis-enabled"><input id="analysis-enabled" type="checkbox"> Also generate a report for each completed live lap</label><div class="analysis-actions"><button id="analysis-models-button" type="button" class="small-button">List models</button><button id="analysis-save" type="submit" class="small-button">Save settings</button><button id="analysis-connect" type="button" class="button secondary">Connect ChatGPT</button><button id="analysis-disconnect" type="button" class="small-button" hidden>Disconnect</button></div></div>
+          <p id="analysis-provider-help" class="field-help">Connect your own ChatGPT account. Chat uses that plan’s allowance. Settings are saved on this dashboard server.</p>
+          <p id="analysis-account" class="field-help" hidden></p>
+          <p id="analysis-source-status" class="field-help">Choose the repository and branch you are using. Each chat message automatically includes that source and saved laps.</p>
+          <p id="analysis-settings-message" class="analysis-settings-message" role="status" hidden></p>
+          <a id="analysis-signin-link" class="button primary analysis-signin-link" target="_blank" rel="noopener noreferrer" hidden>Continue with ChatGPT ↗</a>
+        </form>
+      </details>
+    </section>
 
     <section class="session-strip" aria-label="Session status">
       <div class="status-main"><span id="run-dot" class="dot muted"></span><div><span class="metric-label">SESSION</span><strong id="run-status">Ready to connect</strong></div></div>
@@ -41,8 +81,8 @@
       <section class="map-card card" aria-label="Track map">
         <div class="card-heading"><div class="heading-label"><span class="map-symbol" aria-hidden="true">⌖</span><h2>Track view</h2><span id="frame-label" class="tag">WORLD FRAME</span></div><div class="map-controls"><button id="background-button" class="small-button" aria-pressed="true" title="Show saved map background">Map</button><button id="follow-button" class="small-button" aria-pressed="false">Follow car</button><button id="fit-button" class="small-button" title="Fit route and driven trace">Fit view</button></div></div>
         <div class="map-stage" id="map-stage">
-          <canvas id="map-canvas" aria-label="Map showing full route, MPC reference and prediction horizons, car and driven trace"></canvas>
-          <div id="map-empty" class="empty-state"><span class="empty-icon" aria-hidden="true">⌖</span><h3>Your next run starts here.</h3><p id="map-empty-copy">Connect the ROS bridge with your Lab 7 route.<br>Live telemetry and lap evidence will appear here.</p><button id="empty-connect" class="small-button">Open connection settings ↗</button></div>
+          <canvas id="map-canvas" aria-label="Map showing full route, controller reference and prediction horizons, car and driven trace"></canvas>
+          <div id="map-empty" class="empty-state"><span class="empty-icon" aria-hidden="true">⌖</span><h3>Your next run starts here.</h3><p id="map-empty-copy">Connect the ROS bridge with your controller’s full route.<br>Live telemetry and lap evidence will appear here.</p><button id="empty-connect" class="small-button">Open connection settings ↗</button></div>
           <div class="map-top-label"><span class="dot"></span><span id="map-mode-label">LIVE CAR</span></div>
           <div id="map-scale" class="map-scale"><span></span><small>1 m</small></div>
           <div class="map-help">Drag to pan <span>·</span> Scroll to zoom</div>
@@ -50,8 +90,8 @@
         <div class="overlay-toolbar" aria-label="Map overlays">
           <label style="--overlay:#b79bff"><input type="checkbox" data-overlay="reference" checked><span>Full route</span></label>
           <label style="--overlay:#f1eee5"><input type="checkbox" data-overlay="driven" checked><span>Driven</span></label>
-          <label style="--overlay:#5cd9c3"><input type="checkbox" data-overlay="path" checked><span>MPC prediction</span></label>
-          <label style="--overlay:#e6b4ee"><input type="checkbox" data-overlay="horizon" checked><span>MPC reference</span></label>
+          <label style="--overlay:#5cd9c3"><input type="checkbox" data-overlay="path" checked><span>Prediction</span></label>
+          <label style="--overlay:#e6b4ee"><input type="checkbox" data-overlay="horizon" checked><span>Reference horizon</span></label>
           <label style="--overlay:#e3a56a"><input type="checkbox" data-overlay="scan"><span>Scan</span></label>
           <label style="--overlay:#eabd72"><input type="checkbox" data-overlay="body" checked><span>Body / command</span></label>
         </div>
@@ -65,15 +105,15 @@
             <summary><span>Connection & setup</span><span class="details-chevron">⌄</span></summary>
             <div class="settings-body">
               <div id="simulation-setup" hidden>
-                <label class="field-label" for="repo-path">Lab 7 MPC checkout</label>
-                <input id="repo-path" type="text" spellcheck="false" autocomplete="off" placeholder="/path/to/your/lab7-checkout">
-                <p class="field-help">Runs this checkout’s MPC controller and speed profile in the local simulator.</p>
-                <label class="field-label" for="sim-ref">Git reference <span class="optional-label">optional</span></label><input id="sim-ref" type="text" spellcheck="false" autocomplete="off" placeholder="origin/liam-trial-2"><p class="field-help">Leave blank to use working files. Selecting a reference keeps your checkout in place.</p>
+                <label class="field-label" for="repo-path">MPC simulator checkout</label>
+                <input id="repo-path" type="text" spellcheck="false" autocomplete="off" placeholder="/path/to/compatible-mpc-checkout">
+                <p class="field-help">The built-in simulator requires the supported MPC controller interface. Chat and live telemetry support other lab controllers.</p>
+                <label class="field-label" for="sim-ref">Git reference <span class="optional-label">optional</span></label><input id="sim-ref" type="text" spellcheck="false" autocomplete="off" placeholder="main, feature-branch or commit"><p class="field-help">Leave blank to use working files. Selecting a reference keeps your checkout in place.</p>
                 <details class="nested-details"><summary>Optional paths <span>⌄</span></summary><div class="settings-body"><label class="field-label" for="helper-path">Simulator helper</label><input id="helper-path" type="text" spellcheck="false" placeholder="Use bundled F1TENTH helper"><label class="field-label" for="waypoints-path">Full waypoints CSV</label><input id="waypoints-path" type="text" spellcheck="false" placeholder="mpc/waypoints/&lt;track&gt;.csv"><label class="field-label" for="map-path">Saved map YAML</label><input id="map-path" type="text" spellcheck="false" placeholder="Use track map"></div></details>
                 <div class="field-row"><div><label class="field-label" for="sim-track">Track</label><select id="sim-track"><option value="levine">Levine</option><option value="spielberg">Spielberg</option></select></div><div><label class="field-label" for="seed">Random seed</label><input id="seed" type="number" min="0" max="2147483647" step="1" value="7"></div></div>
                 <button id="connect-button" class="button secondary full">Connect checkout <span>↗</span></button>
               </div>
-              <div id="live-setup"><p class="help-copy">Run the ROS bridge in your car’s ROS environment with the full Lab 7 waypoint CSV. The README includes commands for MPC pose, prediction and reference topics.</p><label class="field-label" for="live-map-path">Saved map YAML on dashboard host</label><input id="live-map-path" type="text" spellcheck="false" placeholder="/path/to/saved-map.yaml"><p class="field-help">Live car mode monitors, records and analyzes completed laps.</p><button id="live-connect-button" class="button secondary full">Listen for live telemetry</button></div>
+              <div id="live-setup"><p class="help-copy">Connect an existing dashboard feed, or run the ROS bridge in your car’s ROS environment with your controller’s full route CSV.</p><label class="field-label" for="live-telemetry-url">Existing dashboard URL <span class="optional-label">optional</span></label><input id="live-telemetry-url" type="text" spellcheck="false" autocomplete="off" placeholder="http://127.0.0.1:8765" aria-describedby="telemetry-url-help telemetry-connection-status"><p id="telemetry-url-help" class="field-help">Read live telemetry and captured laps through your existing SSH tunnel. Leave blank to receive the ROS bridge directly.</p><p id="telemetry-connection-status" class="field-help telemetry-connection-state" role="status" hidden></p><label class="field-label" for="live-map-path">Saved map YAML on dashboard host <span class="optional-label">optional</span></label><input id="live-map-path" type="text" spellcheck="false" placeholder="/path/to/saved-map.yaml"><p class="field-help">An existing dashboard feed supplies its map when available.</p><button id="live-connect-button" class="button secondary full">Listen for live telemetry</button></div>
               <div id="replay-setup" hidden><p class="help-copy">Open a dashboard JSON recording or a compatible telemetry CSV to inspect the run.</p><label for="recording-file" class="button secondary full file-button">Load recording <span>↗</span></label><input id="recording-file" type="file" accept=".json,.csv,application/json,text/csv" hidden><p id="recording-file-name" class="field-help">Files are processed by this local dashboard.</p></div>
             </div>
           </details>
@@ -94,43 +134,25 @@
           </div>
 
           <div id="replay-controls" hidden><div class="section-title"><h3>Inspect the run</h3><span id="replay-count">0 frames</span></div><div class="run-controls"><button id="replay-play" class="button primary">▶ Play recording</button><button id="replay-step" class="button icon-button" aria-label="Next recording frame">▹|</button></div><input id="replay-scrub" type="range" min="0" max="0" value="0" aria-label="Recording frame"><div class="replay-position"><span id="replay-position">Frame —</span><span id="replay-duration">—</span></div><p class="field-help">Replay shows recorded behavior. Use simulation to evaluate new parameters.</p></div>
-          <div id="live-info"><div class="section-title"><h3>Live telemetry</h3></div><p class="help-copy">Check that the full route and localization align with the saved map before evaluating tracking.</p><div class="live-callout"><span class="dot"></span><span id="live-message">Waiting for the ROS bridge.</span></div><p class="field-help">MPC prediction and reference are short horizons. Solver status and effective settings require dedicated controller diagnostics.</p></div>
+          <div id="live-info"><div class="section-title"><h3>Live telemetry</h3></div><p class="help-copy">Check that the full route and localization align with the saved map before evaluating tracking.</p><div class="live-callout"><span id="live-telemetry-dot" class="dot"></span><span id="live-message">Waiting for the ROS bridge.</span></div><p class="field-help">Prediction and reference overlays may be short horizons. Solver status and effective settings require dedicated controller diagnostics.</p></div>
           <details id="diagnostics-panel" class="diagnostics-panel"><summary><span>Diagnostics</span><span id="diagnostics-count">No telemetry</span><span>⌄</span></summary><div id="diagnostics-content"><p class="field-help">Connect a session to inspect available diagnostic information.</p></div></details>
         </div>
       </aside>
     </div>
 
     <section id="lap-engineer" class="lap-engineer" aria-label="Live lap analysis" hidden>
-      <div class="section-heading"><div><p class="eyebrow">LEARN FROM EVERY LAP</p><h2>Lap engineer.</h2><p class="section-description">Measured performance. Evidence to inspect. One change to test next.</p></div><span id="analysis-connection-status" class="engineer-connection">Choose an analysis connection</span></div>
+      <div class="section-heading"><div><p class="eyebrow">RECORDED EVIDENCE</p><h2>Lap history.</h2><p class="section-description">Inspect a capture, highlight evidence, or bring a lap into the conversation.</p></div></div>
       <div class="lap-overview card">
         <div><span class="metric-label">CURRENT LAP</span><strong id="lap-current">—</strong><span id="lap-current-note">Waiting for a full start-line crossing</span></div>
         <div><span class="metric-label">LAPS CAPTURED</span><strong id="lap-count">0</strong><span id="lap-valid-count">Completed laps stay available</span></div>
         <div><span class="metric-label">BEST VALID LAP</span><strong id="lap-best">—</strong><span id="lap-best-note">Build a baseline on this route</span></div>
         <div><span class="metric-label">ANALYSIS QUEUE</span><strong id="lap-pending">0</strong><span id="lap-queue-note">Reports run independently of telemetry</span></div>
       </div>
-      <details id="analysis-settings" class="analysis-settings card">
-        <summary><span class="heading-label"><span class="control-symbol" aria-hidden="true">☷</span><span>Analysis connection</span></span><span id="analysis-settings-summary">GPT-6.1 Sol · high</span><span aria-hidden="true">⌄</span></summary>
-        <form id="analysis-settings-form" class="analysis-settings-body">
-          <div class="analysis-fields">
-            <label>Provider<select id="analysis-provider"><option value="chatgpt">ChatGPT plan</option><option value="openai">OpenAI API</option><option value="compatible">OpenAI-compatible endpoint</option></select></label>
-            <label>Model<input id="analysis-model" type="text" list="analysis-models" value="gpt-6.1-sol" spellcheck="false" autocomplete="off" required><datalist id="analysis-models"></datalist></label>
-            <label>Reasoning effort<select id="analysis-effort"><option value="">Provider default</option><option value="none">None</option><option value="low">Low</option><option value="medium">Medium</option><option value="high" selected>High</option><option value="xhigh">Extra high</option></select></label>
-            <label id="analysis-url-field" hidden>Base URL<input id="analysis-base-url" type="text" placeholder="http://127.0.0.1:11434/v1" spellcheck="false" autocomplete="off"></label>
-            <label id="analysis-key-field" hidden>API key<input id="analysis-api-key" type="password" placeholder="Enter your own key" autocomplete="off"><span class="field-help">Leave blank to keep the saved credential.</span></label>
-            <label class="analysis-source-field">Controller source checkout <span class="optional-label">optional</span><input id="analysis-source-repo" type="text" placeholder="/path/to/controller-checkout" spellcheck="false" autocomplete="off"></label>
-            <label>Git reference <span class="optional-label">optional</span><input id="analysis-source-ref" type="text" placeholder="origin/liam-trial-2" spellcheck="false" autocomplete="off"></label>
-          </div>
-          <div class="analysis-settings-footer"><label class="analysis-enabled"><input id="analysis-enabled" type="checkbox" checked> Analyze completed live laps automatically</label><div class="analysis-actions"><button id="analysis-models-button" type="button" class="small-button">List models</button><button id="analysis-save" type="submit" class="small-button">Save settings</button><button id="analysis-connect" type="button" class="button secondary">Connect ChatGPT</button><button id="analysis-disconnect" type="button" class="small-button" hidden>Disconnect</button></div></div>
-          <p id="analysis-provider-help" class="field-help">Connect your own ChatGPT account. Analysis uses that plan’s allowance. Other installations use their own connection.</p>
-          <p id="analysis-account" class="field-help" hidden></p>
-          <p id="analysis-source-status" class="field-help">Source context describes a local Git revision. The running car’s revision and effective parameters require separate verification.</p>
-          <p id="analysis-settings-message" class="analysis-settings-message" role="status" hidden></p>
-          <a id="analysis-signin-link" class="button primary analysis-signin-link" target="_blank" rel="noopener noreferrer" hidden>Continue with ChatGPT ↗</a>
-        </form>
-      </details>
+
       <div class="lap-workspace card">
         <aside class="lap-library" aria-label="Captured laps"><div class="lap-library-heading"><h3>Lap history</h3><span id="lap-library-count">0 laps</span></div><div id="lap-list" class="lap-list"><p class="lap-empty-help">Complete a full lap with a matching closed reference route to capture the first report.</p></div></aside>
         <article id="lap-report" class="lap-report" aria-live="polite"><div class="lap-report-empty"><span class="empty-icon" aria-hidden="true">↗</span><h3>A lap becomes a useful experiment.</h3><p>Each completed lap gets a performance summary and a report grounded in its recorded telemetry. Select a lap here to inspect the evidence.</p></div></article>
+        <details id="legacy-discussion" class="legacy-discussion" hidden><summary>Previous lap discussion <span>advanced</span></summary>
         <section id="lap-discussion" class="lap-discussion" aria-labelledby="discussion-title" hidden>
           <div class="discussion-heading"><div><span class="eyebrow">TURN EVIDENCE INTO AN EXPERIMENT</span><h3 id="discussion-title">Discuss this lap.</h3><p>Ask follow-up questions, confirm the car’s settings and review a concrete proposal.</p></div><span id="discussion-status" class="discussion-status" role="status">Ready</span></div>
           <div class="discussion-source-note"><p id="discussion-provenance" class="discussion-provenance"></p><div class="discussion-source-actions"><button id="discussion-choose-source" type="button" class="small-button" hidden>Choose controller source ↗</button><button id="discussion-attach-source" type="button" class="small-button" hidden>Attach selected source</button></div></div>
@@ -155,6 +177,7 @@
             <p id="discussion-compose-help" class="field-help">The discussion uses this saved lap and your selected provider. Suggested values become confirmed facts only when you submit them.</p>
           </form>
         </section>
+        </details>
       </div>
     </section>
 
@@ -173,7 +196,7 @@
       <div class="comparison-table"><div class="comparison-row comparison-head"><span>METRIC</span><span>CURRENT</span><span>BASELINE</span></div><div class="comparison-row"><span>Run status</span><strong id="metric-completion">—</strong><strong id="baseline-completion">—</strong></div><div class="comparison-row"><span>Elapsed time</span><strong id="metric-time">—</strong><strong id="baseline-time">—</strong></div><div class="comparison-row"><span>Mean route deviation</span><strong id="metric-error">—</strong><strong id="baseline-error">—</strong></div><div class="comparison-row"><span>Planning time · p95</span><strong id="metric-planning">—</strong><strong id="baseline-planning">—</strong></div></div>
       <div class="recording-panel"><span class="eyebrow">TAKE THE EVIDENCE</span><h3>Record. Inspect. Improve.</h3><p id="recording-description">0 telemetry frames captured</p><a id="download-recording" class="button secondary" href="/api/recording" download="robertaris-run.json">↓ Download recording</a><p class="field-help">Includes available telemetry and run configuration.</p></div>
     </section>
-    <footer class="page-footer"><span>RobertAris <b>RACING LAB</b></span><span>Lab 7 MPC · Local workbench · Optional model analysis</span><span id="footer-version">v0.1</span></footer>
+    <footer class="page-footer"><span>RobertAris <b>RACING LAB</b></span><span>Controller telemetry · Local code · Racing engineer</span><span id="footer-version">v0.1</span></footer>
   </main>
 </body>
 </html>

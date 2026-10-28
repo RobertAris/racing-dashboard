@@ -1,15 +1,16 @@
 # RobertAris Racing Lab
 
-A local workbench for **Lab 7 model predictive control**: simulate the selected
-controller, monitor the car, capture complete live laps and review model
-recommendations for shorter lap times. Inspect the evidence, test a reviewed
-change and compare later laps. The dashboard never edits the controller checkout,
-publishes drive commands or writes live ROS parameters.
+A local workbench for **autonomous racing controllers across labs**: chat about
+your selected repository and branch, monitor the car, capture complete live laps
+and review parameter and code recommendations. Lab 8 MPPI, Lab 7 MPC and other
+controller repositories can supply source context without a required file layout.
+The dashboard never edits the controller checkout, publishes drive commands or
+writes live ROS parameters. The optional built-in simulator supports the MPC
+interface described below.
 
-**Author: RobertAris.** The dashboard is a separate repository from the Lab 7
-controller. Select the controller checkout on the dashboard server and set its
-source-context reference to `origin/liam-trial-2` when configuring your Trial 2 analysis.
-Reading that revision does not switch the checkout's current branch.
+**Author: RobertAris.** Keep the dashboard and your controller in separate
+repositories. Select your controller checkout and branch in chat settings.
+Reading another branch does not switch or modify the checkout's current branch.
 
 ## Start the dashboard
 
@@ -41,9 +42,25 @@ Open **http://127.0.0.1:8765** and select **Live car**. Keep the SSH tunnel runn
 The same-port tunnel also carries the ChatGPT sign-in callback. No ROS installation
 is required on a Mac used only as the browser.
 
-## Connect Lab 7 telemetry
+If the car already has a dashboard receiving telemetry and you run this updated
+dashboard locally, connect the two instead of opening an empty local session:
 
-Start your normal, verified localization and MPC controller workflow. In a second
+```bash
+.venv/bin/racing-dashboard --port 8766 \
+  --telemetry-url http://127.0.0.1:8765
+```
+
+Open **http://127.0.0.1:8766**. The original SSH tunnel stays open on 8765. The local
+dashboard reads live telemetry and imports saved laps from it, retaining each
+capture's source manifest. It never changes the remote dashboard's model settings
+or sends commands to the car. Chat can use controller source on the local Mac.
+You can also set **Existing dashboard URL** under Live car connection settings;
+that selection is saved for later launches. Clear it to accept direct ROS adapter
+posts. Stale upstream data is labeled rather than kept artificially live.
+
+## Connect controller telemetry
+
+Start your normal localization and controller workflow. In a second
 terminal on the ROS host, source that ROS installation and workspace. For example,
 replace these paths with your installed distro/workspace:
 
@@ -53,7 +70,7 @@ source ~/f1tenth_ws/install/setup.bash
 cd ~/robertaris-racing-dashboard
 python3 -m racing_dashboard.ros_adapter \
   --url http://127.0.0.1:8765 \
-  --planner-profile mpc \
+  --planner-profile generic \
   --pose-topic /pf/pose/odom --pose-type odometry \
   --route-file /absolute/path/to/real_track_x_y_yaw_speed.csv
 ```
@@ -63,21 +80,26 @@ real-car localized Odometry; for an already-running ROS simulator, use
 `--pose-topic /ego_racecar/odom` and, when the simulator uses ROS time, add
 `--ros-args -p use_sim_time:=true`.
 
-The MPC adapter reads `/drive`, `/mpc/prediction`, `/mpc/reference`, pose and
-available laser scans. The predicted/reference paths are **short MPC horizons**.
+The generic adapter reads drive commands, pose and available laser scans without
+requiring planner-specific visualization topics. Use `--path-topic` and
+`--reference-topic` for optional paths published by your controller, or
+`--planner-profile mpc` for the built-in MPC topic defaults. These optional paths
+are **short controller horizons**, not full lap routes.
 Lap detection needs a separate **full closed-track route**, matching the running
 controller's CSV: `x, y, yaw, speed` in map-frame meters, radians and m/s. Check map,
 pose and full-route alignment before interpreting lap times or tracking error.
 
 Match the controller's pose offset with `--pose-offset-m` after verification.
-The MPC speed convention uses planar Odometry velocity magnitude; measured speed
+Choose the Odometry speed convention with `--speed-mode`; measured speed
 stays unavailable when the publisher supplies no valid measurement. See
 [the live guide](docs/LIVE.md) for topic overrides, start gates, frames and timing.
 
-## Simulate the Lab 7 controller without ROS
+## Use the built-in MPC simulator
 
-The standalone simulation runs the selected Lab 7 MPC implementation against the
-pinned F1TENTH simulator. Keep the dashboard and controller as separate checkouts:
+The standalone simulator supports the MPC interface used by the Lab 7 controller
+against the pinned F1TENTH simulator. Source review, chat and live telemetry also
+support other controllers; selecting a Lab 8 repository does not make its MPPI
+implementation compatible with this simulator. Keep separate checkouts:
 
 ```text
 ~/robertaris-racing-dashboard/
@@ -128,39 +150,71 @@ The cycle interval and model timestep are separate settings even when both are
 0.1 s. LLM lap recommendations run on Live car captures; standalone simulation is
 for testing and inspecting controller behavior.
 
-## Configure the lap engineer
+## Chat with the racing engineer
 
-Open **Analysis connection** in Live car:
+Use **Racing engineer** at the top of the dashboard as a normal conversation.
+Ask about lap performance, compare runs, or request concrete parameter and code
+changes. The same chat is available in Live car, Simulation and Replay, including
+before the first lap. You do not need to start a per-lap discussion, attach source
+for each message, or fill out confirmation forms.
 
-1. Choose **ChatGPT plan**, model **`gpt-6.1-sol`**, reasoning effort **high**.
-2. Enter the Lab 7 controller checkout path on the server. Set the Git reference
-   to **`origin/liam-trial-2`**, or select the revision you intend to review.
-3. Enable **Analyze completed live laps automatically** and save the settings.
-4. Click **Connect ChatGPT**, then the displayed **Continue with ChatGPT** link.
-   Sign into your own account and authorize this dashboard. Return to the dashboard
-   after the browser flow completes.
+Open **Chat settings** once:
 
-This dashboard obtains its own scoped authorization; it does not read another
-app's credentials. Model availability and usage limits follow the connected
-account and its app settings. Each person running the repository uses their own
-account. Listing models does not verify inference access, and neither saving
-settings nor listing models sends a test inference.
+1. Choose your provider and connect your own ChatGPT account, or enter your
+   OpenAI API key / compatible endpoint credentials.
+2. Enter any controller repository path **on the dashboard server**, including
+   a Lab 8 MPPI or another lab checkout. You can also paste its GitHub URL; the
+   dashboard matches it to an existing local clone so local edits stay available.
+   It does not clone or fetch repositories. A checkout
+   selected for simulation is also available to chat when no separate chat source
+   is configured.
+3. Click **Load branches** and choose the branch you are using, or enter a branch,
+   tag or commit under **Branch or revision**. Leave it blank to follow the
+   checkout's current branch and working files, including local edits.
+4. Save the settings. Automatic lap reports are optional; chat works with them off.
 
-Other providers remain selectable:
+Provider sign-in and model discovery work independently of repository setup.
+An unfinished repository field cannot prevent connecting your ChatGPT account.
+On Python installations with an empty default HTTPS trust store, the dashboard
+loads a verified system certificate bundle, or an installed `certifi` bundle.
+Certificate verification remains enabled; certificate errors identify the trust
+configuration to fix instead of appearing as generic timeouts.
 
-| Provider | Connection |
-| --- | --- |
-| OpenAI API | Your own API key and model; billed separately from a ChatGPT subscription |
-| OpenAI-compatible endpoint | Your base URL, model and optional key, including a privately reachable local server |
+Every question refreshes the saved lap catalog and local source context. The
+chat displays the repository and selected branch/revision. Recommendations use
+that controller's source and parameter names rather than a fixed MPC schema. The
+engineer receives detailed evidence for relevant laps, source and configuration
+files, and a bounded sample of the current run. It can request additional retained
+lap evidence or source excerpts when needed. Context size is bounded; file and
+history omissions are recorded rather than presented as complete coverage.
+Only supported text files in the chosen checkout are read. Credentials, hidden
+files, dependency/build directories and symbolic links are excluded.
 
-Choose **Provider default** reasoning effort when a compatible server does not
-accept a reasoning-effort parameter. The endpoint is reached from the dashboard
-server host, so `localhost` refers to that host.
+Try questions such as:
 
-The source manifest pins the resolved local Git commit for each received lap.
-It is **not verification of the revision or effective settings deployed on the
-car**. The dashboard does not assume a launch file or source default equals a
-runtime setting. Missing configuration and solver diagnostics remain unknown.
+- “Compare my latest lap with the fastest comparable lap. Where am I losing time?”
+- “Which speed-profile parameter should I change, from what value to what value?”
+- “Show the code change to reduce steering oscillation, including the file and
+  how I should test it.”
+
+Replies use normal text and formatted code blocks. **Ask about this lap** focuses
+an existing capture without hiding the other saved laps. **Retry** preserves your
+message after a failed reply. Chat history survives a server restart; **New chat**
+clears the conversation while keeping captured laps. Earlier exchanges may be
+omitted from model context when the conversation grows; the saved transcript
+remains visible.
+
+Source defaults and local edits do not prove what ran on the car. The engineer
+can recommend a numerical experiment against the supplied source, label its
+assumptions, and ask you to verify a missing runtime setting in the conversation.
+Code snippets and diffs are recommendations for review and testing; chat never
+applies them or changes live ROS parameters.
+
+Each installation uses its own connection and account allowance. API billing is
+separate from a ChatGPT subscription. Credentials remain in protected server-side
+storage. Sending a chat message sends the relevant lap evidence, conversation and
+selected source context to the chosen provider. Local source paths refer to the
+server host; use a local server or mount the checkout there when needed.
 
 ## Review a lap and test a change
 
@@ -182,63 +236,18 @@ Displayed episode times are seconds since lap start. Test one reviewed change at
 a time through your existing controller workflow, then compare comparable laps.
 No controller change is applied by the dashboard.
 
-## Discuss a lap and confirm settings
+## Detailed lap reports and previous discussions
 
-Select a valid captured lap, then use **Discuss this lap** below its report.
-Click **Start discussion** to ask the engineer what is missing, or type a specific
-question. The discussion uses your selected provider and model, including when
-automatic lap analysis is paused. Sending a message explicitly requests a model
-reply; simply opening a saved lap does not start a discussion request.
+Lap history and automatic reports remain available below the main chat. Select a
+capture to inspect sector times, tracking and cited evidence. Source manifests
+attached to captures describe the selected local revision, not a verified deployed
+revision. Reports run independently of telemetry and can be retried after failure.
 
-The engineer can ask which speed cap, acceleration settings or source revision
-was used. Click **Answer this question**, enter the value you checked, then choose
-**Confirm and discuss**. Suggested answers are hints to verify, not confirmed
-values. For numeric settings, enter the number in the displayed SI units, such as
-`3.0` for `MAX_SPEED` in m/s. **User-confirmed for this lap** lets you add, correct
-or retract facts. These describe the selected captured lap; they are not measured
-runtime values and do not carry over to other laps.
-
-With sufficient confirmed settings and recorded evidence, the engineer can
-propose one numerical experiment with its rationale, validation and rollback.
-The four native MPC parameters are supported. Changes to acceleration limits also
-need the related profile limits confirmed so the proposed configuration remains
-consistent with the controller's constraints.
-
-Controller source is optional for telemetry discussion and required for code
-proposals. If a discussion started without it, use **Choose controller source**
-to open Analysis connection, select the checkout and Git reference, then save.
-Return to the lap and click **Attach selected source**. This pins the selected
-revision for future replies without changing earlier replies or requesting model
-inference. If a reply already failed, attachment leaves that error visible;
-click **Retry discussion turn** separately when ready. An existing source pin
-cannot be silently replaced.
-
-For a logic change, first confirm `deployed_source_commit` with the full commit
-hash shown in the engineer's question, after checking that it is the revision
-used for this lap. Code proposals include a reviewable, downloadable `.patch`
-against a supplied file at that pinned revision. The dashboard checks that the
-patch matches the saved source and that Python syntax remains valid, entirely in
-memory. It does not execute the patch or establish that its behavior is correct.
-Review and test it through your normal controller workflow.
-
-To assess an experiment, choose another captured lap under **Compare with**,
-describe what you changed and send a message. Comparison requires matching route,
-gate, map and measurement conventions. Measured time differences are evidence;
-configuration and track-condition differences still need checking. The original
-lap's confirmations remain scoped to that lap.
-
-Discussion history, confirmations and proposals are saved with the lap and
-included in **Evidence** exports. A queued turn waits for a connection and survives
-a server restart. Failed replies can be retried without duplicating your message.
-Conversations are limited to 20 exchanges; older context may be omitted from the
-model request while current confirmations and the saved history remain available.
-Run one dashboard server per data directory. A second server must use a different
-`--data-dir` while the first owns that lap history, preventing duplicate requests.
-
-Model work runs independently of telemetry. Captures remain available without an
-analysis connection; pending jobs show in the queue. A failed report preserves its
-capture and can be requested again. A model can suggest an investigation when the
-available signals do not establish the cause of a slowdown.
+Previous per-lap discussions remain accessible under the advanced discussion
+panel. Their user confirmations and validated downloadable patches stay scoped to
+that original lap and pinned source. New conversations should use the main chat.
+Run one dashboard server per data directory; a second server needs a separate
+`--data-dir` so pending model requests cannot be processed twice.
 
 ## Save evidence and replay
 
@@ -253,7 +262,7 @@ sensor/path overlays. This buffer is bounded to 12,000 frames or approximately
 64 MiB; the oldest frames can drop. Per-lap persistence is independent of this
 rolling buffer.
 
-The server stores lap evidence and reports in `laps.sqlite3` under
+The server stores lap evidence, reports and chat history in `laps.sqlite3` under
 `~/.local/share/robertaris-racing-dashboard/`; override with `--data-dir` outside
 source control. Finished evidence retention and pending work are bounded. The
 adapter uses a durable outbox when the dashboard cannot accept a completed lap.

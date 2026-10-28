@@ -1,14 +1,16 @@
-# Lab 7 MPC live monitoring and lap engineering
+# Live monitoring and chat for any controller repository
 
-Use the dashboard with the running Lab 7 controller to capture laps, inspect
-tracking behavior and review evidence-backed improvement experiments. The adapter
+Use the dashboard with Lab 8 MPPI, Lab 7 MPC, or another controller to capture
+laps, inspect tracking behavior and discuss code and tuning experiments. Select
+the local repository and branch in chat settings; the source reader does not
+require a particular lab layout or controller algorithm. The adapter
 subscribes to ROS 2 and sends data to the local dashboard over HTTP. It publishes
 no drive commands and writes no ROS parameters. Controller source remains in its
 own checkout.
 
 ## Check the running controller and topics
 
-Use your existing saved-map localization and verified MPC launch workflow. Inspect
+Use your existing saved-map localization and controller launch workflow. Inspect
 the actual graph before selecting the adapter inputs:
 
 ```bash
@@ -16,8 +18,6 @@ ros2 node list
 ros2 topic info /pf/pose/odom
 ros2 topic echo /pf/pose/odom --once
 ros2 topic info /drive
-ros2 topic info /mpc/reference
-ros2 topic info /mpc/prediction
 ros2 topic list | sort
 ```
 
@@ -29,8 +29,8 @@ types or pose conventions.
 | --- | --- | --- |
 | Selected pose topic | Odometry, PoseStamped or PoseWithCovarianceStamped | Localized position/heading and available measured speed |
 | `/drive` | `ackermann_msgs/msg/AckermannDriveStamped` | Commanded speed and steering angle |
-| `/mpc/reference` | `nav_msgs/msg/Path` | Short reference horizon |
-| `/mpc/prediction` | `nav_msgs/msg/Path` | Short predicted trajectory |
+| Optional selected reference topic | `nav_msgs/msg/Path` | Reference visualization, potentially only a short horizon |
+| Optional selected path topic | `nav_msgs/msg/Path` | Planned/predicted trajectory visualization |
 | `/scan` | `sensor_msgs/msg/LaserScan` | Available laser hits for inspection |
 | Full route CSV | Local file on adapter host | Canonical closed lap geometry and source yaw/speed fields |
 
@@ -58,6 +58,13 @@ callback uses that same loopback port.
 
 ## Connect the adapter
 
+If another dashboard already receives the adapter's data, use its loopback URL
+under **Existing dashboard URL** in the local dashboard's live connection panel.
+For example, leave the car's SSH tunnel on 8765 and run the updated local app with
+`--port 8766 --telemetry-url http://127.0.0.1:8765`. It reads telemetry and captured
+laps without changing the adapter or remote settings. Keep the tunnel running.
+The local app's repository paths refer to the Mac in this arrangement.
+
 Run it using the ROS host's sourced ROS Python interpreter. For example, replace
 the distro, workspace and file paths below with your actual installation:
 
@@ -67,17 +74,31 @@ source ~/f1tenth_ws/install/setup.bash
 cd ~/robertaris-racing-dashboard
 python3 -m racing_dashboard.ros_adapter \
   --url http://127.0.0.1:8765 \
-  --planner-profile mpc \
+  --planner-profile generic \
   --pose-topic /pf/pose/odom --pose-type odometry \
   --scan-topic /scan --drive-topic /drive \
   --map-frame map \
   --route-file /absolute/path/to/real_track_x_y_yaw_speed.csv
 ```
 
-MPC is the default planner profile; the explicit flag makes the example clear.
-Override the horizon topics with `--path-topic` and `--reference-topic` if the
-running controller uses different names. Missing horizons are reported rather
-than replaced with invented planner output.
+Use **generic** for Lab 8 or any controller without the older compatibility topic
+layout. It only requires localized pose and the full route for lap timing;
+commanded speed/steering come from the selected drive topic. A controller does
+not have to publish MPC or RRT visualization topics. If it publishes Path
+visualizations, add `--path-topic` and/or `--reference-topic` with the names you
+verified using `ros2 topic list` and `ros2 topic info`. They remain optional and
+never replace the full lap route.
+
+For example, omit both optional flags when the Lab 8 controller only exposes
+pose and drive commands. If its visualization message type differs from
+`nav_msgs/msg/Path`, leave that overlay disconnected; pose/drive capture and chat
+still work. Choose `--speed-mode magnitude` or `--speed-mode longitudinal` to match
+the publisher's measured velocity convention. Generic automatic mode uses planar
+velocity magnitude.
+
+The existing **mpc** profile remains the default for compatibility and supplies
+`/mpc/prediction` and `/mpc/reference`; **rrt** supplies the older RRT marker/grid
+topics. Pass the profile explicitly when changing controller families.
 
 The adapter needs `rclpy`, `tf2_ros`, `nav_msgs`, `sensor_msgs`, `geometry_msgs`,
 `visualization_msgs` and `ackermann_msgs` from the ROS environment. The server can
@@ -93,7 +114,7 @@ then use the simulator's matching full route and saved map:
 ```bash
 python3 -m racing_dashboard.ros_adapter \
   --url http://127.0.0.1:8765 \
-  --planner-profile mpc \
+  --planner-profile generic \
   --pose-topic /ego_racecar/odom --pose-type odometry \
   --route-file /absolute/path/to/simulator_x_y_yaw_speed.csv \
   --ros-args -p use_sim_time:=true
@@ -103,16 +124,18 @@ Use `use_sim_time` when the simulator publishes ROS clock time. Match its
 `ROS_DOMAIN_ID`, RMW configuration and sourced workspace. This monitors the
 existing ROS simulation and controller.
 
-For standalone simulation without ROS, use the dashboard's separate Lab 7 MPC
-simulation workflow in the [README](../README.md#simulate-the-lab-7-controller-without-ros).
+The dashboard's standalone simulator has a specific MPC controller interface.
+For Lab 8 and other controllers, run your existing ROS simulator and connect it
+with the generic adapter above. See the simulation compatibility section in the
+[README](../README.md).
 It reads the selected controller revision and launch configuration without
 switching branches. The lap engineer described here analyzes Live car captures,
 including telemetry received from an existing ROS simulator.
 
 ## Align the full route, map and vehicle reference
 
-Supply the running controller's **full closed-track CSV**, with columns
-`x, y, yaw, speed`: XY in map-frame meters, yaw in radians and speed in m/s.
+Supply the running controller's **full closed-track CSV**: required `x,y` in
+map-frame meters, optionally followed by `yaw` in radians and `speed` in m/s.
 Comment headers and one ordinary header row are accepted. The route file is on
 the adapter host. The simulator's bundled route is not automatically aligned to
 a saved real-car map.
@@ -188,25 +211,34 @@ excluded from evidence exports. Enabled reviews send compact evidence and
 configured source context to the chosen provider. Capturing and viewing laps do
 not require a model connection.
 
-## Pin the Lab 7 controller context
+## Select the repository and branch for chat
 
-Set **Controller source checkout** to the Lab 7 Git checkout on the dashboard
-server. Set **Git reference** to `origin/liam-trial-2` for Trial 2. It must exist in
-that local repository; the dashboard does not fetch branches for you. Another
-branch, tag or commit can be selected explicitly.
+Open **Settings** in the main chat. Set **Repository path or GitHub URL** to the
+checkout you are using, such as `/path/to/lab8-checkout`, or paste its GitHub URL.
+GitHub URLs are matched to existing local clones; no clone or fetch is performed.
+Use **Load branches** to
+list its local and remote-tracking branches, then choose **Branch or revision**.
+You can also enter a branch, tag or commit directly. The chosen reference must
+already exist locally; the dashboard does not fetch or check out branches.
 
-The reader uses Git to resolve a commit and read supported MPC implementation and
-launch files. It does not switch the working tree's branch, import controller
-code or modify files. Each received lap keeps an immutable copy of the selected
-local source manifest.
+Leave the branch field blank to read the checkout's current working files,
+including local edits. Chat shows the repository and current branch so you can
+check which source is attached. An explicit reference reads that revision's Git
+blobs without switching the checkout. Python, C/C++, CUDA, configuration and other
+supported source files are read generically; MPC package names and Lab 7 file
+paths are not required.
 
-That manifest is labeled **local source context**, with deployment unverified.
-It cannot establish which package was built, installed or launched on the car.
-A ROS parameter dump can help verify exposed parameters, but does not reveal
-hardcoded cost matrices or model constants. The dashboard leaves effective
-runtime settings unverified unless independently supplied in telemetry. Discussion
-answers are separately labeled user-confirmed context for that lap. CSV speed values
-also do not establish the controller's effective postprocessed speed profile.
+Every new question refreshes source context and saved lap history. Ask normal
+questions such as “Which parameter in this Lab 8 controller should I tune?” or
+“Show the code change for this branch.” The engineer uses the selected repository's
+actual parameter names and code instead of assuming MPC settings. Source files
+are never imported, executed or modified. Each received lap also keeps the
+selected source manifest separately from the refreshed chat context.
+
+Local source is not proof of what was built or launched on the car. Runtime
+configuration remains unknown unless supplied in telemetry or verified by you.
+The engineer distinguishes local source defaults, your statements and measured
+lap evidence when recommending an experiment.
 
 ## Interpret the report and replay its evidence
 

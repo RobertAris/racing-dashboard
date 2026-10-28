@@ -318,6 +318,10 @@ def validate_discussion_response(turn, context):
             source = context.get("source_context") or {}
             if not isinstance(source, dict) or not isinstance(source.get("files", []), list):
                 raise ValueError("Discussion context contains invalid pinned source")
+            if source.get("mode") == "working_tree":
+                raise ValueError("Working-tree HEAD identifies the base commit, not the local file snapshot. "
+                                 "Use the main chat for local code recommendations or select a pinned Git revision "
+                                 "for a legacy lap discussion patch")
             commit = source.get("commit")
             if (not isinstance(commit, str) or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit)
                     or confirmed.get("deployed_source_commit") != commit

@@ -238,6 +238,61 @@ class StateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_route_records(filename)
 
+    def test_generic_profile_uses_explicit_optional_topics_without_lab_defaults(self):
+        options = parser().parse_args(["--planner-profile", "generic",
+            "--path-topic", "/custom/trajectory", "--reference-topic", "/custom/reference"])
+        state = LiveState(options, lambda frame, stamp: (0, 0, 0), now=lambda: self.clock[0])
+        self.assertEqual(state.topics["path"], "/custom/trajectory")
+        self.assertEqual(state.topics["reference"], "/custom/reference")
+        self.assertFalse(any("/mpc/" in topic or "/rrt/" in topic for topic in state.topics.values()))
+        message = self.odometry("map")
+        message.twist.twist.linear = NS(x=-3, y=4)
+        state.update("pose", message, state.pose)
+        horizon = NS(header=header(), poses=[NS(header=header(), pose=pose(1, 2)),
+                                            NS(header=header(), pose=pose(2, 2))])
+        state.update("reference", horizon, state.path)
+        state.update("path", horizon, state.path)
+        state.values["route"] = [[0, 0], [2, 0], [2, 2], [0, 2]]
+        snapshot = state.snapshot()
+        self.assertEqual(snapshot["actual_speed"], 5)
+        self.assertEqual(snapshot["path"], [[1, 2], [2, 2]])
+        self.assertEqual(snapshot["route"], [])
+        self.assertFalse(snapshot["lap"]["enabled"])
+        self.assertIn("--route-file", snapshot["lap"]["disabled_reason"])
+
+    def test_generic_profile_captures_a_full_lap_without_visualization_messages(self):
+        from tests.test_laps import ROUTE, sample
+        with tempfile.TemporaryDirectory() as directory:
+            filename = Path(directory) / "route.csv"
+            filename.write_text("\n".join(f"{x},{y}" for x, y in ROUTE))
+            options = parser().parse_args(["--planner-profile", "generic", "--route-file", str(filename),
+                "--lap-gate-x", "2", "--lap-gate-y", "0", "--lap-gate-yaw", str(math.pi / 2)])
+            bundles = []
+            state = LiveState(options, lambda frame, stamp: (0, 0, 0), now=lambda: self.clock[0],
+                              lap_sink=lambda bundle: bundles.append(bundle))
+            self.assertNotIn("path", state.topics)
+            self.assertNotIn("reference", state.topics)
+            self.assertNotIn("tree", state.topics)
+            message = self.odometry("map")
+            for index in range(150):
+                point = sample(-.4 + index * .05, 1 + index * .05)
+                seconds = point["time_s"]
+                message.header.stamp = NS(sec=int(seconds), nanosec=round((seconds - int(seconds)) * 1e9))
+                message.pose.pose = pose(*point["pose"])
+                command = NS(header=message.header, drive=NS(speed=2.4, steering_angle=.05))
+                state.update("command", command, state.command)
+                state.update("pose", message, state.pose)
+            snapshot = state.snapshot()
+            self.assertEqual(len(bundles), 1)
+            self.assertEqual(bundles[0]["status"], "valid")
+            self.assertEqual(bundles[0]["metadata"]["planner_profile"], "generic")
+            self.assertEqual(bundles[0]["samples"][10]["speed_command"], 2.4)
+            self.assertEqual(bundles[0]["samples"][10]["steering"], .05)
+            self.assertEqual(snapshot["diagnostics"]["planner_unavailable"], {})
+            self.assertTrue(snapshot["lap"]["enabled"])
+            self.assertNotIn("/mpc/prediction", snapshot["diagnostics"]["missing_topics"])
+            self.assertNotIn("/rrt/path", snapshot["diagnostics"]["missing_topics"])
+
     def test_pose_offset_is_explicit_and_original_localization_is_retained(self):
         options = parser().parse_args(["--pose-offset-m", "0.25"])
         state = LiveState(options, lambda frame, stamp: (0, 0, 0), now=lambda: self.clock[0])

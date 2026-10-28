@@ -1,4 +1,4 @@
-"""Read-only Lab 7 MPC -> RobertAris dashboard bridge; ROS is optional until main()."""
+"""Read-only ROS 2 controller -> RobertAris dashboard bridge; ROS is optional until main()."""
 from __future__ import annotations
 
 import argparse
@@ -67,7 +67,7 @@ def marker_points(marker, transform):
 
 
 def load_route_records(filename):
-    """Accept XY[/yaw/speed] CSV and retain the Lab 7 reference profile."""
+    """Accept XY[/yaw/speed] CSV and retain its optional reference profile."""
     points = []
     with Path(filename).expanduser().open(encoding="utf-8") as source:
         for number, row in enumerate(csv.reader(source), 1):
@@ -227,11 +227,17 @@ class LiveState:
         self.topics = {
             "pose": options.pose_topic, "scan_hits": options.scan_topic,
             "command": options.drive_topic,
-            "path": getattr(options, "path_topic", None) or ("/mpc/prediction" if self.profile == "mpc" else "/rrt/path"),
         }
+        path_topic = getattr(options, "path_topic", None) or {
+            "mpc": "/mpc/prediction", "rrt": "/rrt/path"}.get(self.profile)
+        if path_topic:
+            self.topics["path"] = path_topic
         if self.profile == "mpc":
             self.topics["reference"] = getattr(options, "reference_topic", None) or "/mpc/reference"
-        else:
+        elif self.profile == "generic":
+            if getattr(options, "reference_topic", None):
+                self.topics["reference"] = options.reference_topic
+        elif self.profile == "rrt":
             self.topics.update(tree=options.tree_topic, goal=options.goal_topic,
                                route=options.route_topic, grid=options.grid_topic)
         self.laps = LapDetector(self.static_route, closed=self.projector.closed, config=LapConfig(
@@ -259,8 +265,8 @@ class LiveState:
         mode = getattr(self.options, "speed_mode", "auto")
         if self.options.pose_type != "odometry":
             return "unavailable; pose messages contain no measured velocity"
-        if mode == "magnitude" or (mode == "auto" and self.profile == "mpc"):
-            return "odometry hypot(twist.linear.x, twist.linear.y); matches Lab 7 MPC magnitude"
+        if mode == "magnitude" or (mode == "auto" and self.profile in {"mpc", "generic"}):
+            return "odometry hypot(twist.linear.x, twist.linear.y); verify publisher velocity convention"
         return "odometry twist.linear.x (signed longitudinal; verify publisher)"
 
     def emit_laps(self, bundles):
@@ -274,9 +280,9 @@ class LiveState:
                 self.completed_laps = self.completed_laps[-32:]
 
     def route(self):
-        # A full CSV wins over a dynamic overlay. MPC reference is a short
-        # horizon and is never eligible for lap timing or route projection.
-        if self.profile == "mpc":
+        # Controller visualization paths may be short horizons and are never
+        # eligible for lap timing. Only the RRT compatibility route is a full route.
+        if self.profile != "rrt":
             return self.static_route
         return self.static_route or (self.values.get("route") or [])
 
@@ -347,7 +353,7 @@ class LiveState:
         if self.options.pose_type == "odometry":
             speed = float(message.twist.twist.linear.x)
             mode = getattr(self.options, "speed_mode", "auto")
-            if mode == "magnitude" or (mode == "auto" and self.profile == "mpc"):
+            if mode == "magnitude" or (mode == "auto" and self.profile in {"mpc", "generic"}):
                 speed = math.hypot(speed, float(getattr(message.twist.twist.linear, "y", 0.0)))
             finite(speed)
             result["actual_speed"] = speed
@@ -440,8 +446,8 @@ class LiveState:
         if ages.get("pose", 0) > self.laps.config.max_gap_s:
             self.emit_laps(self.laps.invalidate("telemetry_gap"))
         lap_status = self.laps.status()
-        if self.profile == "mpc" and not self.static_route:
-            lap_status["disabled_reason"] = "Set --route-file to the full Lab 7 waypoint CSV; MPC horizons cannot time laps"
+        if self.profile != "rrt" and not self.static_route:
+            lap_status["disabled_reason"] = "Set --route-file to the full closed-track waypoint CSV; controller visualization paths cannot time laps"
         planner_unavailable = {}
         if self.profile == "mpc":
             for key, label in (("reference", "Reference horizon"), ("path", "Prediction horizon")):
@@ -451,6 +457,15 @@ class LiveState:
             planner_limitations = [
                 "Solver status, solve duration and active MPC settings are unavailable from reference/prediction paths.",
                 "MPC paths are short visualization horizons; lap timing uses the full waypoint CSV.",
+            ]
+        elif self.profile == "generic":
+            for key, label in (("reference", "Controller reference"), ("path", "Controller path")):
+                if key in self.topics and not fresh(key):
+                    reason = self.errors.get(key) or ("no message received" if key not in ages else "latest message is stale")
+                    planner_unavailable[key] = f"{label} unavailable on {self.topics[key]}: {reason}"
+            planner_limitations = [
+                "Controller diagnostics and effective configuration are unavailable from standard visualization topics.",
+                "Controller visualization paths do not establish a full lap route; lap timing uses the full waypoint CSV.",
             ]
         else:
             planner_limitations = ["Planner timing, rejection reasons and effective configuration are unavailable from standard visualization topics."]
@@ -512,27 +527,27 @@ class LiveState:
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--url", default="http://127.0.0.1:8765", help="Dashboard base URL")
-    result.add_argument("--pose-topic", default="/pf/pose/odom", help="Lab 7 localized odometry; verify the active MPC pose subscription")
+    result.add_argument("--pose-topic", default="/pf/pose/odom", help="Localized pose topic; verify the active controller's message type and pose convention")
     result.add_argument("--pose-type", choices=("odometry", "pose", "pose_covariance"), default="odometry")
     result.add_argument("--scan-topic", default="/scan")
     result.add_argument("--drive-topic", default="/drive")
-    result.add_argument("--planner-profile", choices=("mpc", "rrt"), default="mpc",
-                        help="Default Lab 7 MPC topics/speed convention; rrt enables legacy compatibility")
-    result.add_argument("--path-topic", help="Prediction path, default /mpc/prediction (/rrt/path in compatibility mode)")
-    result.add_argument("--reference-topic", help="MPC horizon only; defaults to /mpc/reference")
+    result.add_argument("--planner-profile", choices=("generic", "mpc", "rrt"), default="mpc",
+                        help="generic accepts any controller with optional path topics; mpc (default) and rrt supply compatibility topic defaults")
+    result.add_argument("--path-topic", help="Optional nav_msgs/Path visualization; MPC default /mpc/prediction, RRT default /rrt/path, generic has no default")
+    result.add_argument("--reference-topic", help="Optional nav_msgs/Path reference visualization; MPC default /mpc/reference, generic has no default")
     result.add_argument("--tree-topic", default="/rrt/tree", help="Only used with --planner-profile rrt")
     result.add_argument("--goal-topic", default="/rrt/goal", help="Only used with --planner-profile rrt")
     result.add_argument("--route-topic", default="/rrt/waypoints", help="Full-route marker in rrt compatibility mode; CSV takes priority")
     result.add_argument("--grid-topic", default="/rrt/grid", help="Only used with --planner-profile rrt")
     result.add_argument("--pose-offset-m", type=float, default=0.0,
-                        help="Shift localization backward along yaw; match the active MPC pose_offset explicitly")
+                        help="Shift localization backward along yaw; match the controller's vehicle reference explicitly")
     result.add_argument("--speed-mode", choices=("auto", "longitudinal", "magnitude"), default="auto",
-                        help="auto uses XY velocity magnitude for MPC, signed longitudinal velocity for RRT")
+                        help="auto uses XY velocity magnitude for generic/MPC, signed longitudinal velocity for RRT; verify the publisher")
     result.add_argument("--map-frame", default="map")
     result.add_argument("--publish-hz", type=float, default=10)
     result.add_argument("--stale-after", type=float, default=1.0, help="Clear dynamic overlays after this many seconds")
     result.add_argument("--scan-max-points", type=int, default=540)
-    result.add_argument("--route-file", help="Full closed-track XY[,yaw,speed] CSV in map meters; required for MPC lap timing")
+    result.add_argument("--route-file", help="Full closed-track XY[,yaw,speed] CSV in map meters; required for generic/MPC lap timing")
     result.add_argument("--route-open", action="store_true", help="Do not close the reference route or wrap its progress")
     result.add_argument("--lap-gate-x", type=float, help="Start/finish center X; defaults to first route waypoint")
     result.add_argument("--lap-gate-y", type=float, help="Start/finish center Y; supply with --lap-gate-x")
@@ -594,18 +609,18 @@ def main(argv=None):
                 (pose_message, options.pose_topic, "pose", self.state.pose),
                 (LaserScan, options.scan_topic, "scan_hits", self.state.scan),
                 (AckermannDriveStamped, options.drive_topic, "command", self.state.command),
-                (RosPath, self.state.topics["path"], "path", self.state.path),
             ]
-            if options.planner_profile == "mpc":
-                subscriptions.append((RosPath, self.state.topics["reference"], "reference", self.state.path))
-            else:
+            for key in ("path", "reference"):
+                if key in self.state.topics:
+                    subscriptions.append((RosPath, self.state.topics[key], key, self.state.path))
+            if options.planner_profile == "rrt":
                 subscriptions.append((OccupancyGrid, options.grid_topic, "grid", self.state.grid))
             self.subscriptions_kept = []
             for message_type, topic, key, convert in subscriptions:
                 self.subscriptions_kept.append(self.create_subscription(
                     message_type, topic, lambda msg, key=key, convert=convert: self.state.update(key, msg, convert),
                     qos_profile_sensor_data))
-            for key, topic in ([] if options.planner_profile == "mpc" else
+            for key, topic in ([] if options.planner_profile != "rrt" else
                                [(key, self.state.topics[key]) for key in ("tree", "goal", "route")]):
                 self.subscriptions_kept.append(self.create_subscription(
                     Marker, topic, lambda msg, key=key: self.state.update(key, msg, lambda item: self.state.marker(item, key)),

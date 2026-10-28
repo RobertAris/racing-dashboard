@@ -2,19 +2,21 @@ import copy
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import ssl
 import tempfile
 import threading
 import time
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 
 from racing_dashboard.llm import (API, APP_NAME, AUTHORIZE_ENDPOINT, DISCOVERY, ISSUER,
                                   TOKEN_ENDPOINT, LLMConnection, LLMError, _NoRedirect,
-                                  validate_report)
+                                  _verified_ssl_context, validate_report)
 from racing_dashboard.discussion import DISCUSSION_SCHEMA
 
 
@@ -547,6 +549,30 @@ class ConnectionTests(unittest.TestCase):
                 self.connection._request(API + "/models")
             self.assertFalse(caught.exception.retryable)
 
+    def test_certificate_failures_are_actionable_sanitized_and_not_retried(self):
+        certificate_error = ssl.SSLCertVerificationError(1, "private-certificate-diagnostic")
+        for failure in (certificate_error, URLError(certificate_error)):
+            with self.subTest(failure=type(failure).__name__), patch("racing_dashboard.llm.build_opener") as opener:
+                opener.return_value.open.side_effect = failure
+                with self.assertRaises(LLMError) as caught:
+                    self.connection._request(DISCOVERY)
+                self.assertIn("certificate", str(caught.exception))
+                self.assertIn("SSL_CERT_FILE", str(caught.exception))
+                self.assertNotIn("private", str(caught.exception))
+                self.assertFalse(caught.exception.retryable)
+
+    def test_https_transport_uses_verified_context_and_redirect_protection(self):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        with patch("racing_dashboard.llm._verified_ssl_context", return_value=context), \
+                patch("racing_dashboard.llm.build_opener") as opener:
+            opener.return_value.open.return_value = io.BytesIO(b'{"ok":true}')
+            self.assertTrue(self.connection._request(DISCOVERY)["ok"])
+        redirect_handler, https_handler = opener.call_args.args
+        self.assertIsInstance(redirect_handler, _NoRedirect)
+        self.assertIs(https_handler._context, context)
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+
     def test_report_validation_bounds_and_grounding_shape(self):
         self.assertEqual(validate_report(REPORT), REPORT)
         for change in ({"findings": REPORT["findings"] * 4}, {"summary": 5}, {"extra": "unexpected"}):
@@ -559,6 +585,51 @@ class ConnectionTests(unittest.TestCase):
         self.connection.configure({"provider": "openai", "api_key": "key"})
         with self.assertRaises(LLMError):
             self.connection.analyze({"speed": float("nan")})
+
+
+class TLSContextTests(unittest.TestCase):
+    def test_existing_default_trust_is_preserved(self):
+        context = Mock()
+        context.cert_store_stats.return_value = {"x509_ca": 2}
+        with patch("racing_dashboard.llm.ssl.create_default_context", return_value=context), \
+                patch.dict(os.environ, {}, clear=True):
+            self.assertIs(_verified_ssl_context(), context)
+        context.load_verify_locations.assert_not_called()
+
+    def test_empty_framework_python_trust_loads_system_ca_bundle(self):
+        context = Mock()
+        context.cert_store_stats.return_value = {"x509_ca": 0}
+
+        def loaded(**kwargs):
+            context.cert_store_stats.return_value = {"x509_ca": 140}
+
+        context.load_verify_locations.side_effect = loaded
+        with patch("racing_dashboard.llm.ssl.create_default_context", return_value=context), \
+                patch("racing_dashboard.llm.Path.is_file", return_value=True), \
+                patch.dict(os.environ, {}, clear=True):
+            self.assertIs(_verified_ssl_context(), context)
+        context.load_verify_locations.assert_called_once_with(cafile="/etc/ssl/cert.pem")
+
+    def test_explicit_custom_trust_is_not_expanded_with_other_roots(self):
+        for variable in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+            context = Mock()
+            context.cert_store_stats.return_value = {"x509_ca": 0}
+            with self.subTest(variable=variable), \
+                    patch("racing_dashboard.llm.ssl.create_default_context", return_value=context), \
+                    patch.dict(os.environ, {variable: "/custom/ca-location"}, clear=True):
+                self.assertIs(_verified_ssl_context(), context)
+            context.load_verify_locations.assert_not_called()
+
+    def test_no_available_ca_bundle_fails_closed_with_actionable_error(self):
+        context = Mock()
+        context.cert_store_stats.return_value = {"x509_ca": 0}
+        with patch("racing_dashboard.llm.ssl.create_default_context", return_value=context), \
+                patch("racing_dashboard.llm.Path.is_file", return_value=False), \
+                patch.dict(os.environ, {}, clear=True), self.assertRaises(LLMError) as caught:
+            _verified_ssl_context()
+        self.assertIn("trusted HTTPS certificates", str(caught.exception))
+        self.assertFalse(caught.exception.retryable)
+        context.load_verify_locations.assert_not_called()
 
 
 @unittest.skipUnless(importlib.util.find_spec("jwt"), "Install .[llm] to test real JWT signatures")

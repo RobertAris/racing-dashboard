@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "robertaris-racing-dashboard"
 version = "0.1.0"
-description = "Lab 7 MPC telemetry, live lap engineering, and replay dashboard by RobertAris"
+description = "Autonomous racing telemetry, controller chat, and lap engineering across lab repositories"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "RobertAris" }]

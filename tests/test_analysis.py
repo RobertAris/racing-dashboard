@@ -69,6 +69,20 @@ class FakeConnection:
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_import_preserves_capture_source_without_replacing_selected_source(self):
+        selected = {"status": "local_source", "commit": "current-selection"}
+        self.service.source = copy.deepcopy(selected)
+        captured = {"status": "local_source", "commit": "original-capture",
+                    "files": [{"path": "controller.py", "content": "gain = 1.0\n"}]}
+        original = copy.deepcopy(captured)
+        item = lap()
+        self.service.ingest(item, source_context=captured)
+        captured["commit"] = "changed-after-import"
+        self.assertEqual(self.service.get(item["id"])["source_context"], original)
+        self.assertEqual(self.service.source, selected)
+        self.assertTrue(self.service.ingest(item, source_context={})["duplicate"])
+        self.assertEqual(self.service.get(item["id"])["source_context"], original)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.connection = FakeConnection()
@@ -213,13 +227,23 @@ class SourceContextTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             def run(command, **kwargs):
                 from subprocess import CompletedProcess
-                content = b"0123456789abcdef\n" if "rev-parse" in command else b"raise RuntimeError('must never execute')\n"
+                if "rev-parse" in command:
+                    content = b"0123456789abcdef\n"
+                elif "ls-tree" in command:
+                    content = b"100644 blob aaaa 41\tcontroller/main.py\0"
+                elif "symbolic-ref" in command:
+                    content = b"main\n"
+                else:
+                    content = b"raise RuntimeError('must never execute')\n"
                 return CompletedProcess(command, 0, content, b"")
             with patch("racing_dashboard.source_context.subprocess.run", side_effect=run):
-                context = read_source_context(folder, "origin/liam-trial-2")
+                context = read_source_context(folder, "origin/controller-experiment")
             self.assertEqual(context["commit"], "0123456789abcdef")
             self.assertFalse(context["deployment_verified"])
-            self.assertEqual(len(context["files"]), 3)
+            self.assertEqual(context["mode"], "git_revision")
+            self.assertEqual(context["ref"], "origin/controller-experiment")
+            self.assertEqual(context["files"][0]["path"], "controller/main.py")
+            self.assertEqual(context["files"][0]["content"], "raise RuntimeError('must never execute')\n")
             with self.assertRaises(ValueError):
                 read_source_context(folder, "--output=/tmp/bad")
 

@@ -15,7 +15,9 @@ import zlib
 from .laps import summarize_lap, validate_lap
 from .llm import LLMConnection
 from .discussion_service import LapDiscussionMixin, ensure_discussion_schema
+from .chat_service import ChatMixin, ensure_chat_schema
 from .source_context import read_source_context
+from .repository import resolve_repository_selection
 
 
 def _json(value):
@@ -48,12 +50,13 @@ def validate_report(report, evidence):
     return copy.deepcopy(report)
 
 
-class AnalysisService(LapDiscussionMixin):
-    def __init__(self, data_dir, *, connection=None, active=False):
+class AnalysisService(ChatMixin, LapDiscussionMixin):
+    def __init__(self, data_dir, *, connection=None, active=False, chat_environment=None):
         self.data_dir = Path(data_dir).expanduser()
         self.path = self.data_dir / "laps.sqlite3"
         self.settings_path = self.data_dir / "analysis_settings.json"
         self.connection = connection or LLMConnection(self.data_dir)
+        self.chat_environment = chat_environment
         self.lock = threading.RLock()
         self._store_fd = None
         self._store_closed = False
@@ -63,7 +66,7 @@ class AnalysisService(LapDiscussionMixin):
         self.discussion_wake = threading.Event()
         self.stop = threading.Event()
         self.active = active
-        self.settings = {"enabled": False, "source_repo": "", "source_ref": "HEAD"}
+        self.settings = {"enabled": False, "source_repo": "", "source_ref": ""}
         self.source = read_source_context("")
         self.source_error = None
         self.summaries = []
@@ -95,6 +98,7 @@ class AnalysisService(LapDiscussionMixin):
         self.thread.start()
         self.discussion_thread = threading.Thread(target=self._run_discussions, name="lap-discussion", daemon=True)
         self.discussion_thread.start()
+        self.init_chat()
 
     def _acquire_store(self):
         """Own this history for the service lifetime; caller holds self.lock."""
@@ -165,6 +169,7 @@ class AnalysisService(LapDiscussionMixin):
                                    (self._comparison_key(old_lap), old_lap["lap_time_s"], row["id"]))
                 db.execute("CREATE INDEX IF NOT EXISTS laps_comparison ON laps(comparison_key,status,lap_time_s)")
                 ensure_discussion_schema(db)
+                ensure_chat_schema(db)
                 with db:
                     yield db
             finally:
@@ -204,6 +209,8 @@ class AnalysisService(LapDiscussionMixin):
                     row["discussion_status"] = "waiting_for_connection"
             return {"connection": {**connection, "source_repo": self.settings["source_repo"],
                                    "source_ref": self.settings["source_ref"],
+                                   "source_repo_name": self.source.get("repo_name"),
+                                   "source_branch": self.source.get("branch"),
                                    "source_status": self.source_error or self.source.get("status"),
                                    "source_commit": self.source.get("commit")},
                     "enabled": self.settings["enabled"], "active": self.active,
@@ -223,6 +230,8 @@ class AnalysisService(LapDiscussionMixin):
                     if not isinstance(value, type(settings[name])):
                         raise ValueError("Invalid analysis setting: " + name)
                     settings[name] = value
+            selection = resolve_repository_selection(settings["source_repo"], settings["source_ref"])
+            settings["source_repo"], settings["source_ref"] = selection["repo"], selection["ref"]
             source = read_source_context(settings["source_repo"], settings["source_ref"])
             if connection_values:
                 self.connection.configure(connection_values)
@@ -237,10 +246,28 @@ class AnalysisService(LapDiscussionMixin):
                 self.settings, self.source, self.source_error = settings, source, None
             self.wake.set()
             self.discussion_wake.set()
+            self.chat_wake.set()
         return self.state()
 
-    def ingest(self, value):
+    def configure_provider(self, values):
+        """Connect a model independently of unfinished repository selection."""
+        with self.config_lock:
+            self.connection.configure(values)
+            self.wake.set()
+            self.discussion_wake.set()
+            self.chat_wake.set()
+        return self.state()
+
+    def ingest(self, value, *, source_context=None):
         lap = validate_lap(value)
+        if source_context is not None:
+            if not isinstance(source_context, dict) or len(_json(source_context).encode()) > 512 * 1024:
+                raise ValueError("Imported source manifest must be an object of at most 512 KiB")
+            files = source_context.get("files", [])
+            if (not isinstance(files, list) or len(files) > 1000 or any(
+                    not isinstance(item, dict) or not isinstance(item.get("path"), str)
+                    or not isinstance(item.get("content"), str) for item in files)):
+                raise ValueError("Imported source files must contain paths and text")
         # Lap validation owns numeric/size limits. A source cannot overwrite an acknowledged lap.
         with self.lock, self._database() as db:
             existing = db.execute("SELECT id FROM laps WHERE id=?", (lap["id"],)).fetchone()
@@ -261,7 +288,8 @@ class AnalysisService(LapDiscussionMixin):
             state = "queued" if lap["status"] == "valid" else "invalid"
             db.execute("INSERT INTO laps(id,created_at,status,analysis_status,lap,metrics,summary,source_context,comparison_key,lap_time_s) VALUES(?,?,?,?,?,?,?,?,?,?)",
                        (lap["id"], datetime.now(timezone.utc).isoformat(), lap["status"], state,
-                        zlib.compress(_json(lap).encode(), 6), _json(metrics), _json(summary), _json(self.source),
+                        zlib.compress(_json(lap).encode(), 6), _json(metrics), _json(summary),
+                        _json(self.source if source_context is None else source_context),
                         self._comparison_key(lap), lap["lap_time_s"]))
             # Pending jobs survive retention; evict only old finished evidence.
             count = db.execute("SELECT COUNT(*) FROM laps").fetchone()[0]
@@ -354,9 +382,9 @@ class AnalysisService(LapDiscussionMixin):
                     "measurement_limits": [
                         "Steering is a command, not measured wheel angle. Odometry speed depends on the publisher.",
                         "Route deviation may be intentional; no collision, slip, actuator fault or solver failure can be inferred from it.",
-                        "Published MPC prediction headers may use solve-completion time; geometric divergence is not a time-aligned prediction residual.",
+                        "Published controller path headers may use planning-completion time; geometric divergence is not a time-aligned prediction residual without verified timing semantics.",
                         "Local Git context is not verified deployed source. Missing effective settings and solver diagnostics remain unknown.",
-                        "reference_speed is interpolated from the source CSV, not a verified active MPC target. The controller can cap and reshape it using MAX_SPEED and acceleration/deceleration limits.",
+                        "reference_speed is interpolated from the source CSV, not a verified active controller target. Inspect the selected controller to determine how it caps or reshapes that profile.",
                         "Baseline sector differences are observed comparisons, not guaranteed achievable savings; obstacle/track conditions may differ.",
                     ]}
         evidence["lap"]["metadata"] = copy.deepcopy(metrics.get("metadata", {}))
@@ -423,7 +451,8 @@ class AnalysisService(LapDiscussionMixin):
             self.stop.set()
             self.wake.set()
             self.discussion_wake.set()
-        workers = (self.thread, self.discussion_thread)
+            self.chat_wake.set()
+        workers = (self.thread, self.discussion_thread, self.chat_thread)
         for worker in workers:
             if worker is not threading.current_thread():
                 worker.join(timeout=.5)
